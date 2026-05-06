@@ -157,15 +157,24 @@ async function runDeletionTestForTarget(targetName: string, packageManager: Pack
   // Fresh dir; copy ONLY durable artifacts.
   const dir = mkdtempSync(join(tmpdir(), `phoenix-deletion-${resolved.runtime.name}-`));
   let server: ServerHandle | undefined;
+  let preserveTmpDir = false;
   try {
     cpSync(join(repoRoot, 'examples', 'todo-app', 'spec'), join(dir, 'spec'), { recursive: true });
     cpSync(join(repoRoot, 'evals'), join(dir, 'evals'), { recursive: true });
 
-    const opts = { cwd: dir, stdio: 'pipe' as const };
+    // Phoenix's bootstrap canonicalization + LLM regen takes 10-20 minutes per
+    // target on a real LLM. Stream stdout/stderr through so the user can see
+    // progress (rather than vitest looking frozen).
+    const log = (msg: string) => process.stderr.write(`  [${resolved.runtime.name}] ${msg}\n`);
+    const opts = { cwd: dir, stdio: ['ignore', 'inherit', 'inherit'] as ['ignore', 'inherit', 'inherit'] };
 
-    // Full Phoenix flow with real LLM.
+    log('phoenix init…');
     execSync(`node ${JSON.stringify(cli)} init --arch=${targetName}`, opts);
+
+    log('phoenix bootstrap (LLM canonicalization — slow)…');
     execSync(`node ${JSON.stringify(cli)} bootstrap`, opts);
+
+    log('phoenix regen (LLM module generation — slow)…');
     execSync(`node ${JSON.stringify(cli)} regen`, opts);
 
     // pnpm v10 blocks postinstall by default; allow native binaries.
@@ -175,7 +184,9 @@ async function runDeletionTestForTarget(targetName: string, packageManager: Pack
       pkg.pnpm = { onlyBuiltDependencies: ['better-sqlite3', 'esbuild'] };
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
     }
+    log(`${packageManager} install (one-time per target)…`);
     execSync(`${packageManager} install --silent`, { cwd: dir, stdio: 'pipe', timeout: 180_000 });
+    log('booting server…');
 
     // Boot.
     const port = await pickFreePort();
@@ -212,13 +223,60 @@ async function runDeletionTestForTarget(targetName: string, packageManager: Pack
     // Run each evaluation through the architecture's adapter.
     for (const eval_ of resolvedEvals) {
       const result = await resolved.architecture.runEvaluation(eval_, { port }, context);
-      expect(result.pass,
-        `${targetName} :: eval "${result.name}" failed: ${result.reason ?? 'unknown'}`,
-      ).toBe(true);
+      if (!result.pass) {
+        // Diagnostic dump on failure — preserve the temp dir and log enough
+        // to triage. Covers the three likely causes: test runner has wrong
+        // mount path, LLM emitted unexpected routes, or IU plan named the IU
+        // differently than the eval expected.
+        const lines: string[] = [];
+        lines.push(`\n────── DELETION-TEST DIAGNOSTICS — ${targetName} ──────`);
+        lines.push(`Temp dir (preserved): ${dir}`);
+        lines.push(`Eval that failed:     ${result.name}`);
+        lines.push(`Reason:               ${result.reason ?? 'unknown'}`);
+        lines.push(`\n--- IU plan (.phoenix/graphs/ius.json) ---`);
+        try {
+          const planText = readFileSync(iuPath, 'utf8');
+          const plan = JSON.parse(planText) as ImplementationUnit[];
+          for (const iu of plan) {
+            lines.push(`  - "${iu.name}"  →  output: ${iu.output_files.join(', ')}`);
+          }
+        } catch (e) { lines.push(`  (failed to read: ${(e as Error).message})`); }
+        lines.push(`\n--- Resolved interface registry ---`);
+        for (const e of context.interfaces) {
+          lines.push(`  - "${e.name}" (${e.role}) mount_path="${e.mount_path}"`);
+        }
+        lines.push(`\n--- Probing server endpoints ---`);
+        for (const probePath of ['/health', '/tasks', '/projects', '/']) {
+          try {
+            const r = await fetch(`http://localhost:${port}${probePath}`);
+            const ct = r.headers.get('content-type') ?? '';
+            const body = ct.includes('json') ? JSON.stringify(await r.json()).slice(0, 200) : '<non-json>';
+            lines.push(`  GET ${probePath} → ${r.status} ${body}`);
+          } catch (e) { lines.push(`  GET ${probePath} → error: ${(e as Error).message}`); }
+        }
+        lines.push(`\n--- Inspect by hand ---`);
+        lines.push(`  cat ${join(dir, 'src/server.ts')}`);
+        lines.push(`  ls ${join(dir, 'src/generated')}`);
+        lines.push(`  cat ${join(dir, 'src/generated')}/*/*.ts | head -200`);
+        lines.push(`────────────────────────────────────────────────────────\n`);
+        console.error(lines.join('\n'));
+        preserveTmpDir = true;
+        expect(result.pass,
+          `${targetName} :: eval "${result.name}" failed: ${result.reason ?? 'unknown'}`,
+        ).toBe(true);
+        return; // unreachable
+      }
     }
+  } catch (err) {
+    // Any thrown error before we reached eval evaluation: preserve dir too.
+    if (!preserveTmpDir) {
+      console.error(`\n[deletion-test] ${targetName} threw before eval; tmp dir preserved at:\n  ${dir}\n`);
+      preserveTmpDir = true;
+    }
+    throw err;
   } finally {
     await server?.kill();
-    rmSync(dir, { recursive: true, force: true });
+    if (!preserveTmpDir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -245,7 +303,7 @@ describe('E2E: The Deletion Test', () => {
   for (const t of targets) {
     it.skipIf(skipReason !== null)(
       `passes for ${t} from durable-only state`,
-      { timeout: 360_000 },
+      { timeout: 1_800_000 }, // 30 min — LLM bootstrap canonicalization (~17 calls) + regen (~6 calls) is genuinely slow
       async () => { await runDeletionTestForTarget(t, pm!); },
     );
   }
