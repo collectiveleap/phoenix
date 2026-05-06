@@ -239,6 +239,14 @@ export const nodeTypescript: RuntimeTarget = {
   promptExtension: PROMPT_EXTENSION,
   codeExamples: CODE_EXAMPLES,
 
+  mandatoryImports: `## MANDATORY: Your module MUST start with these exact imports
+\`\`\`
+import { Hono } from 'hono';
+import { db, registerMigration } from '../../db.js';
+import { z } from 'zod';
+\`\`\`
+Do NOT import Database from better-sqlite3. Do NOT create new Database(). Use the db import above.`,
+
   sharedFiles: {
     'src/db.ts': DB_FILE,
     'src/app.ts': APP_FILE,

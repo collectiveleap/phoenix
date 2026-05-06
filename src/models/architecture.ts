@@ -57,6 +57,13 @@ export interface RuntimeTarget {
   promptExtension: string;
   /** Few-shot code examples showing the exact patterns */
   codeExamples: string;
+  /**
+   * Runtime-specific "MANDATORY imports" prompt block, spliced into the user
+   * prompt for live LLM regen. Owns its own markdown formatting; should
+   * include both the required import lines and any "do not import X" guidance
+   * that's specific to this target's package set. Ignored in stub mode.
+   */
+  mandatoryImports: string;
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

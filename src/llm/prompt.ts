@@ -70,15 +70,12 @@ export function buildPrompt(
   lines.push(`Generate a TypeScript module implementing "${iu.name}".`);
   lines.push('');
 
-  // For architecture mode, inject the mandatory imports at the top of the prompt
+  // For architecture mode, inject the runtime target's mandatory-imports
+  // block at the top of the prompt. The runtime owns this string so it can
+  // accurately describe its own package set (e.g., the stdlib variant
+  // references node:sqlite, not better-sqlite3).
   if (target) {
-    lines.push('## MANDATORY: Your module MUST start with these exact imports');
-    lines.push('```');
-    lines.push(`import { Hono } from 'hono';`);
-    lines.push(`import { db, registerMigration } from '../../db.js';`);
-    lines.push(`import { z } from 'zod';`);
-    lines.push('```');
-    lines.push('Do NOT import Database from better-sqlite3. Do NOT create new Database(). Use the db import above.');
+    lines.push(target.runtime.mandatoryImports);
     lines.push('');
   }
 

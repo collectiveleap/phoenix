@@ -68,6 +68,17 @@ export const nodeTypescriptStdlib: RuntimeTarget = {
   promptExtension: nodeTypescript.promptExtension,
   codeExamples: nodeTypescript.codeExamples,
 
+  // Same import surface as node-typescript (the shared db.ts exports the same
+  // db/registerMigration), but the "do not bypass" hint references the
+  // stdlib driver this target actually ships.
+  mandatoryImports: `## MANDATORY: Your module MUST start with these exact imports
+\`\`\`
+import { Hono } from 'hono';
+import { db, registerMigration } from '../../db.js';
+import { z } from 'zod';
+\`\`\`
+Do NOT import DatabaseSync from node:sqlite. Do NOT instantiate a Database directly. Use the db import above.`,
+
   sharedFiles: {
     ...nodeTypescript.sharedFiles,
     'src/db.ts': DB_FILE,
