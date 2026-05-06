@@ -1,0 +1,108 @@
+import { Router } from 'express';
+import type { Request, Response } from 'express';
+import { db, registerMigration } from '../../db.js';
+import { z } from 'zod';
+
+// ─── Database migrations ────────────────────────────────────────────────────
+
+registerMigration('projects', `
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT '#3b82f6',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+// ─── Schemas ────────────────────────────────────────────────────────────────
+
+const CreateProjectSchema = z.object({
+  name: z.string().min(1).max(200),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().default('#3b82f6'),
+});
+
+const UpdateProjectSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+});
+
+// ─── Routes ─────────────────────────────────────────────────────────────────
+
+const router = Router();
+
+const SELECT_PROJECT_WITH_COUNT = `
+  SELECT
+    projects.*,
+    COUNT(CASE WHEN tasks.completed = 0 THEN 1 END) as active_task_count
+  FROM projects
+  LEFT JOIN tasks ON projects.id = tasks.project_id
+`;
+
+router.get('/', (_req: Request, res: Response) => {
+  const projects = db.prepare(`${SELECT_PROJECT_WITH_COUNT}
+    GROUP BY projects.id
+    ORDER BY projects.created_at DESC
+  `).all();
+  res.json(projects);
+});
+
+router.get('/:id', (req: Request, res: Response) => {
+  const project = db.prepare(`${SELECT_PROJECT_WITH_COUNT}
+    WHERE projects.id = ?
+    GROUP BY projects.id
+  `).get(req.params.id);
+  if (!project) { res.status(404).json({ error: 'Not found' }); return; }
+  res.json(project);
+});
+
+router.post('/', (req: Request, res: Response) => {
+  const result = CreateProjectSchema.safeParse(req.body);
+  if (!result.success) { res.status(400).json({ error: result.error.issues[0].message }); return; }
+  const { name, color } = result.data;
+  const info = db.prepare('INSERT INTO projects (name, color) VALUES (?, ?)').run(name, color);
+  const project = db.prepare(`${SELECT_PROJECT_WITH_COUNT}
+    WHERE projects.id = ?
+    GROUP BY projects.id
+  `).get(info.lastInsertRowid);
+  res.status(201).json(project);
+});
+
+router.patch('/:id', (req: Request, res: Response) => {
+  const id = req.params.id;
+  if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(id)) { res.status(404).json({ error: 'Not found' }); return; }
+  const result = UpdateProjectSchema.safeParse(req.body);
+  if (!result.success) { res.status(400).json({ error: result.error.issues[0].message }); return; }
+  const u = result.data;
+  if (u.name !== undefined) db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(u.name, id);
+  if (u.color !== undefined) db.prepare('UPDATE projects SET color = ? WHERE id = ?').run(u.color, id);
+  const project = db.prepare(`${SELECT_PROJECT_WITH_COUNT}
+    WHERE projects.id = ?
+    GROUP BY projects.id
+  `).get(id);
+  res.json(project);
+});
+
+router.delete('/:id', (req: Request, res: Response) => {
+  const id = req.params.id;
+  if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(id)) { res.status(404).json({ error: 'Not found' }); return; }
+
+  // Check if project has any tasks (cascade protection)
+  const taskCount = db.prepare('SELECT COUNT(*) as count FROM tasks WHERE project_id = ?').get(id) as { count: number };
+  if (taskCount.count > 0) {
+    res.status(400).json({ error: 'Cannot delete project with existing tasks' });
+    return;
+  }
+
+  db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+  res.status(204).send();
+});
+
+export default router;
+
+/** @internal Phoenix VCS traceability — do not remove. */
+export const _phoenix = {
+  iu_id: '85a06deb292fbc006424c2365b05d081f4f92fa2581e04a09ee20cb9f7295067',
+  name: 'Projects',
+  risk_tier: 'high',
+  canon_ids: [6 as const],
+} as const;

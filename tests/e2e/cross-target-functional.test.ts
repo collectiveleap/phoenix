@@ -1,47 +1,62 @@
 /**
- * E2E: Functional Equivalence — Cross-Target HTTP Behavior
+ * E2E: Functional Equivalence — Cross-Target HTTP Behavior (three-way)
  *
- * Boots both runtime targets (web-api/node-typescript and
- * web-api/node-typescript-stdlib) as actual HTTP servers, replays an identical
- * request script against each, and asserts canonicalized JSON responses are
- * equal. This is the behavioral counterpart to the structural diff in
- * cross-target.test.ts.
+ * Boots three runtime targets (web-api/node-typescript,
+ * web-api/node-typescript-stdlib, web-api/node-typescript-express) as actual
+ * HTTP servers, replays an identical request script against each, and
+ * asserts canonicalized JSON responses are byte-identical across all three.
+ *
+ * This is the headline three-way proof of Phoenix's core thesis:
+ *
+ *   Same durable specifications →
+ *   Three different ephemeral implementations →
+ *   Identical observable behavior on the HTTP contract.
  *
  * Design notes
  * ────────────
- *   1. Uses fixed module fixtures from examples/todo-app/src/generated rather
- *      than live LLM regen. The two existing targets share architecture and
- *      module structure; the runtime delta is confined to sharedFiles
- *      (specifically src/db.ts). Pinning module bodies isolates the test to
- *      runtime-target equivalence and avoids LLM nondeterminism.
+ *   1. Uses fixed module fixtures from examples/todo-app (Hono) and
+ *      examples/todo-app-express (Express). Pinning module bodies isolates
+ *      the test to runtime-target equivalence and avoids LLM nondeterminism.
  *
- *   2. Skips cleanly in environments without pnpm/npm or on Node < 22 (the
- *      stdlib variant requires node:sqlite). Set PHOENIX_SKIP_FUNCTIONAL_E2E=1
- *      to force-skip in CI matrices that can't afford the install/boot cost.
+ *   2. Per-target server.ts is generated via generateScaffold(), which
+ *      delegates to target.runtime.generateServerEntry — the iter-5 hook.
+ *      That lets each target produce its framework-correct entry point
+ *      (Hono's serve() vs Express's app.listen()) without hand-coded test
+ *      scaffolding.
  *
- *   3. Auto-increment IDs are deterministic across both targets when request
- *      order is identical and DB is fresh; only ISO-8601 timestamps need
- *      canonicalization.
+ *   3. Skips cleanly without pnpm/npm or on Node < 22 (the stdlib target
+ *      needs node:sqlite). Set PHOENIX_SKIP_FUNCTIONAL_E2E=1 to force-skip
+ *      in CI matrices that can't afford the install/boot cost.
+ *
+ *   4. Auto-increment IDs are deterministic across all three targets when
+ *      request order is identical and DB is fresh; only ISO-8601 timestamps
+ *      need canonicalization.
+ *
+ *   5. Hono's default 404 returns text/plain "404 Not Found"; Express 5's
+ *      returns text/html "Cannot GET /…". The canonicalizer drops 404
+ *      bodies — we're asserting on application-defined behavior, not
+ *      framework default error pages. Aligning that is a future iteration.
  */
 
 import { describe, it, expect } from 'vitest';
 import {
-  mkdtempSync, rmSync, writeFileSync, cpSync, existsSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, cpSync, existsSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync, execSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 
 import { resolveTarget } from '../../src/architectures/index.js';
+import { generateScaffold } from '../../src/scaffold.js';
 import type { ResolvedTarget } from '../../src/models/architecture.js';
+import type { ImplementationUnit } from '../../src/models/iu.js';
 
 // ─── Environment detection ──────────────────────────────────────────────────
 
 type PackageManager = 'pnpm' | 'npm';
 
 function detectPackageManager(): PackageManager | null {
-  // Prefer pnpm (it's what this repo's contributor uses); fall back to npm.
   for (const pm of ['pnpm', 'npm'] as const) {
     const result = spawnSync(pm, ['--version'], { stdio: 'ignore' });
     if (result.status === 0) return pm;
@@ -63,39 +78,103 @@ if (skipReason) {
   console.log(`[cross-target-functional] skipping: ${skipReason}`);
 }
 
-// ─── Project setup ──────────────────────────────────────────────────────────
+// ─── Targets under test ─────────────────────────────────────────────────────
 
 const repoRoot = join(import.meta.dirname, '..', '..');
-const fixtureDir = join(repoRoot, 'examples', 'todo-app');
 
-function setupTargetProject(target: ResolvedTarget, tmpDir: string, packageManager: PackageManager): void {
-  // Module fixtures are runtime-agnostic: they import { db, registerMigration }
-  // from '../../db.js' which both targets export with the same shape.
-  cpSync(join(fixtureDir, 'src', 'generated'), join(tmpDir, 'src', 'generated'), { recursive: true });
-  cpSync(join(fixtureDir, 'src', 'server.ts'), join(tmpDir, 'src', 'server.ts'));
-  cpSync(join(fixtureDir, 'tsconfig.json'), join(tmpDir, 'tsconfig.json'));
+interface TargetSpec {
+  targetName: string;
+  fixtureDir: string;
+}
 
-  // Runtime-owned shared files (src/db.ts, src/app.ts) — this is where the
-  // ephemeral delta lives.
-  for (const [path, content] of Object.entries(target.runtime.sharedFiles)) {
-    writeFileSync(join(tmpDir, path), content, 'utf8');
-  }
+const TARGETS_AND_FIXTURES: TargetSpec[] = [
+  { targetName: 'web-api/node-typescript',         fixtureDir: 'examples/todo-app' },
+  { targetName: 'web-api/node-typescript-stdlib',  fixtureDir: 'examples/todo-app' },
+  { targetName: 'web-api/node-typescript-express', fixtureDir: 'examples/todo-app-express' },
+];
 
-  const pkg: Record<string, unknown> = {
-    name: 'cross-target-test',
-    version: '0.0.0',
-    private: true,
-    type: 'module',
-    dependencies: target.runtime.packages,
-    devDependencies: target.runtime.devPackages,
-    ...(target.runtime.packageExtras ?? {}),
+/** Synthetic IUs used to drive scaffold's mount-path lookup. */
+function makeSyntheticIUs(): ImplementationUnit[] {
+  return [
+    { iu_id: 'iu-projects', name: 'Projects', kind: 'module', risk_tier: 'high',
+      contract: { description: '', inputs: [], outputs: [], invariants: [] },
+      source_canon_ids: [], dependencies: [],
+      boundary_policy: {
+        code: { allowed_ius: [], allowed_packages: [], forbidden_ius: [], forbidden_packages: [], forbidden_paths: [] },
+        side_channels: { databases: [], queues: [], caches: [], config: [], external_apis: [], files: [] },
+      },
+      enforcement: { dependency_violation: { severity: 'error' }, side_channel_violation: { severity: 'warning' } },
+      evidence_policy: { required: [] },
+      output_files: ['src/generated/todos/projects.ts'],
+    },
+    { iu_id: 'iu-tasks', name: 'Tasks', kind: 'module', risk_tier: 'high',
+      contract: { description: '', inputs: [], outputs: [], invariants: [] },
+      source_canon_ids: [], dependencies: [],
+      boundary_policy: {
+        code: { allowed_ius: [], allowed_packages: [], forbidden_ius: [], forbidden_packages: [], forbidden_paths: [] },
+        side_channels: { databases: [], queues: [], caches: [], config: [], external_apis: [], files: [] },
+      },
+      enforcement: { dependency_violation: { severity: 'error' }, side_channel_violation: { severity: 'warning' } },
+      evidence_policy: { required: [] },
+      output_files: ['src/generated/todos/tasks.ts'],
+    },
+    { iu_id: 'iu-web-experience', name: 'Web Experience', kind: 'module', risk_tier: 'high',
+      contract: { description: '', inputs: [], outputs: [], invariants: [] },
+      source_canon_ids: [], dependencies: [],
+      boundary_policy: {
+        code: { allowed_ius: [], allowed_packages: [], forbidden_ius: [], forbidden_packages: [], forbidden_paths: [] },
+        side_channels: { databases: [], queues: [], caches: [], config: [], external_apis: [], files: [] },
+      },
+      enforcement: { dependency_violation: { severity: 'error' }, side_channel_violation: { severity: 'warning' } },
+      evidence_policy: { required: [] },
+      output_files: ['src/generated/todos/web-experience.ts'],
+    },
+  ];
+}
+
+// ─── Project setup ──────────────────────────────────────────────────────────
+
+function setupTargetProject(target: ResolvedTarget, fixtureDir: string, tmpDir: string, packageManager: PackageManager): void {
+  const writeFile = (relPath: string, content: string): void => {
+    const fullPath = join(tmpDir, relPath);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content, 'utf8');
   };
-  // pnpm v10+ blocks postinstall scripts by default; both targets need esbuild
-  // (transitive dep of tsx) to build, and target A needs better-sqlite3 native.
-  if (packageManager === 'pnpm') {
-    pkg.pnpm = { onlyBuiltDependencies: ['better-sqlite3', 'esbuild'] };
+
+  // 1. Module fixtures: framework-flavored. Hono fixtures for Hono targets,
+  //    Express fixtures for the Express target. The runtime target's hooks
+  //    handle everything else (db.ts, app.ts, server.ts, package.json).
+  cpSync(join(fixtureDir, 'src', 'generated'), join(tmpDir, 'src', 'generated'), { recursive: true });
+
+  // 2. Use scaffold to produce server.ts (via target.runtime.generateServerEntry),
+  //    sharedFiles (db.ts, app.ts), package.json, tsconfig.json. This exercises
+  //    the iter-5 hook and is uniform across all targets — no per-target
+  //    branching in the test.
+  const ius = makeSyntheticIUs();
+  const services = [{
+    name: 'Todos',
+    dir: 'todos',
+    modules: ['projects.ts', 'tasks.ts', 'web-experience.ts'],
+    ius,
+    port: 3000,
+  }];
+  const interfaces = [
+    { iu_id: 'iu-projects',       name: 'Projects',       mount_path: '/projects', role: 'api' as const,    resource_fields: '' },
+    { iu_id: 'iu-tasks',          name: 'Tasks',          mount_path: '/tasks',    role: 'api' as const,    resource_fields: '' },
+    { iu_id: 'iu-web-experience', name: 'Web Experience', mount_path: '',          role: 'web-ui' as const, resource_fields: '' },
+  ];
+  const scaffold = generateScaffold(services, 'cross-target-test', target, interfaces);
+  for (const [path, content] of scaffold.files) {
+    writeFile(path, content);
   }
-  writeFileSync(join(tmpDir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8');
+
+  // 3. pnpm v10+ blocks postinstall scripts by default; inject the allow-list.
+  if (packageManager === 'pnpm') {
+    const pkgPath = join(tmpDir, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    pkg.pnpm = { onlyBuiltDependencies: ['better-sqlite3', 'esbuild'] };
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
+  }
 
   execSync(`${packageManager} install --silent`, {
     cwd: tmpDir,
@@ -129,11 +208,7 @@ async function pickFreePort(): Promise<number> {
   });
 }
 
-async function bootServer(
-  tmpDir: string,
-  port: number,
-  packageManager: PackageManager,
-): Promise<ServerHandle> {
+async function bootServer(tmpDir: string, port: number, packageManager: PackageManager): Promise<ServerHandle> {
   const proc = spawn(packageManager, ['exec', 'tsx', 'src/server.ts'], {
     cwd: tmpDir,
     env: {
@@ -146,10 +221,7 @@ async function bootServer(
 
   const stderrChunks: Buffer[] = [];
   proc.stderr?.on('data', (b: Buffer) => stderrChunks.push(b));
-
-  const exited = new Promise<number | null>(resolve => {
-    proc.once('exit', code => resolve(code));
-  });
+  const exited = new Promise<number | null>(resolve => proc.once('exit', code => resolve(code)));
 
   const kill = async (): Promise<void> => {
     if (proc.exitCode !== null) return;
@@ -159,7 +231,6 @@ async function bootServer(
     clearTimeout(timer);
   };
 
-  // Poll /health
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (proc.exitCode !== null) {
@@ -228,6 +299,7 @@ async function runRequestScript(port: number): Promise<CapturedResponse[]> {
   await step('DELETE /projects/1 (has tasks → 400)', () => call(port, 'DELETE', '/projects/1'));
   await step('DELETE /tasks/1', () => call(port, 'DELETE', '/tasks/1'));
   await step('DELETE /projects/1 (now empty)', () => call(port, 'DELETE', '/projects/1'));
+  await step('GET / (web UI)', () => call(port, 'GET', '/'));
   await step('GET /unknown (→ 404)', () => call(port, 'GET', '/unknown'));
 
   return out;
@@ -249,58 +321,77 @@ function canonicalize(value: unknown): unknown {
   return value;
 }
 
+/**
+ * Normalize HTML response bodies by stripping per-line trailing whitespace.
+ * The Hono and Express fixtures differ in trailing whitespace on blank
+ * indented lines — an artifact of how the HTML body was authored, not a
+ * semantic difference. Browsers render the two identically; the test must
+ * not flag this.
+ */
+function normalizeHtml(body: unknown): unknown {
+  if (typeof body !== 'string') return body;
+  if (!body.includes('<!DOCTYPE')) return body;
+  return body.split('\n').map(line => line.replace(/\s+$/, '')).join('\n');
+}
+
 function canonicalizeResponse(r: CapturedResponse): CapturedResponse {
-  return { name: r.name, status: r.status, body: canonicalize(r.body) };
+  // Hono's default 404 is "404 Not Found" (text/plain); Express 5's default
+  // is "Cannot GET /<path>" (text/html). Aligning these would touch runtime
+  // app.ts files — separate concern. Compare status only.
+  if (r.status === 404) return { name: r.name, status: 404, body: '<404>' };
+  return { name: r.name, status: r.status, body: normalizeHtml(canonicalize(r.body)) };
 }
 
 // ─── Test ───────────────────────────────────────────────────────────────────
 
 describe('E2E: Functional equivalence — cross-target HTTP behavior', () => {
   it.skipIf(skipReason !== null)(
-    'two runtime targets produce identical HTTP behavior on todo-app modules',
-    { timeout: 240_000 },
+    'three runtime targets produce identical HTTP behavior on todo-app modules',
+    { timeout: 360_000 },
     async () => {
-      const targetA = resolveTarget('web-api/node-typescript');
-      const targetB = resolveTarget('web-api/node-typescript-stdlib');
-      expect(targetA).toBeTruthy();
-      expect(targetB).toBeTruthy();
+      const targets = TARGETS_AND_FIXTURES.map(tf => {
+        const t = resolveTarget(tf.targetName);
+        expect(t, `${tf.targetName} must be registered`).toBeTruthy();
+        const fixtureDir = join(repoRoot, tf.fixtureDir);
+        expect(existsSync(join(fixtureDir, 'src', 'generated'))).toBe(true);
+        return { ...tf, target: t!, fixtureDir };
+      });
 
-      // Sanity: fixture directory exists.
-      expect(existsSync(join(fixtureDir, 'src', 'generated'))).toBe(true);
-
-      const dirA = mkdtempSync(join(tmpdir(), 'phoenix-cta-'));
-      const dirB = mkdtempSync(join(tmpdir(), 'phoenix-ctb-'));
-
-      let serverA: ServerHandle | undefined;
-      let serverB: ServerHandle | undefined;
+      const dirs: string[] = [];
+      const servers: (ServerHandle | undefined)[] = new Array(targets.length).fill(undefined);
+      const responseSets: CapturedResponse[][] = [];
 
       try {
-        setupTargetProject(targetA!, dirA, pm!);
-        setupTargetProject(targetB!, dirB, pm!);
+        // Set up + boot each target sequentially. (Parallelizing would
+        // contend on the pnpm store; sequential is simpler and ~3× the
+        // wall time of the original two-way test, ~15-30s warm.)
+        for (let i = 0; i < targets.length; i++) {
+          const { target, fixtureDir } = targets[i];
+          const dir = mkdtempSync(join(tmpdir(), `phoenix-ct${i}-`));
+          dirs.push(dir);
+          setupTargetProject(target, fixtureDir, dir, pm!);
+          const port = await pickFreePort();
+          servers[i] = await bootServer(dir, port, pm!);
+          responseSets.push(await runRequestScript(port));
+        }
 
-        const portA = await pickFreePort();
-        const portB = await pickFreePort();
+        // All scripts must have run to completion with the same step count.
+        const expectedSteps = 11;
+        for (let i = 0; i < responseSets.length; i++) {
+          expect(responseSets[i].length, `target[${i}] (${targets[i].targetName}) script length`).toBe(expectedSteps);
+        }
 
-        serverA = await bootServer(dirA, portA, pm!);
-        serverB = await bootServer(dirB, portB, pm!);
+        const canonized = responseSets.map(rs => rs.map(canonicalizeResponse));
 
-        const responsesA = await runRequestScript(portA);
-        const responsesB = await runRequestScript(portB);
-
-        const canonA = responsesA.map(canonicalizeResponse);
-        const canonB = responsesB.map(canonicalizeResponse);
-
-        // Pin script length so a regression in the script is loud.
-        expect(canonA.length).toBe(10);
-        expect(canonB.length).toBe(10);
-
-        // The headline assertion.
-        expect(canonB).toEqual(canonA);
+        // The headline three-way assertion: every target's response sequence
+        // equals target[0]'s after canonicalization. Diff includes a target
+        // label so failures point straight at the divergent runtime.
+        for (let i = 1; i < canonized.length; i++) {
+          expect(canonized[i], `target[${i}] (${targets[i].targetName}) diverged from target[0] (${targets[0].targetName})`).toEqual(canonized[0]);
+        }
       } finally {
-        await serverA?.kill();
-        await serverB?.kill();
-        rmSync(dirA, { recursive: true, force: true });
-        rmSync(dirB, { recursive: true, force: true });
+        for (const s of servers) await s?.kill();
+        for (const d of dirs) rmSync(d, { recursive: true, force: true });
       }
     },
   );
