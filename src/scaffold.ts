@@ -11,7 +11,7 @@
 
 import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
-import type { ResolvedTarget } from './models/architecture.js';
+import type { ResolvedTarget, RouteWiring } from './models/architecture.js';
 import { sha256 } from './semhash.js';
 
 export interface ServiceDescriptor {
@@ -144,42 +144,23 @@ export function generateScaffold(
       files.set(path, content);
     }
 
-    // Generate architecture-specific server entry point that mounts all generated modules
-    const routeImports: string[] = [];
-    const routeMounts: string[] = [];
+    // Pre-compute route wiring from services + interface registry, then
+    // delegate the actual server.ts content to the runtime target. The
+    // runtime decides framework conventions (Hono's serve, Bun.serve,
+    // Express's app.listen, etc.); we just supply the routes.
+    const routes: RouteWiring[] = [];
     for (const svc of services) {
       for (let i = 0; i < svc.modules.length; i++) {
         const mod = svc.modules[i];
         const iu = svc.ius[i];
-        const modName = mod.replace('.ts', '').replace(/-/g, '_').replace(/[^a-zA-Z0-9_]/g, '_');
+        const importName = mod.replace('.ts', '').replace(/-/g, '_').replace(/[^a-zA-Z0-9_]/g, '_');
         const importPath = `./generated/${svc.dir}/${mod.replace('.ts', '.js')}`;
-        routeImports.push(`import ${modName} from '${importPath}';`);
-        // Look up mount path from interface registry (single source of truth)
-        const entry = interfaces?.find(e => e.iu_id === iu?.iu_id);
-        const prefix = entry?.mount_path ?? '';
-        routeMounts.push(`mount('${prefix}', ${modName});`);
+        const mountPath = interfaces?.find(e => e.iu_id === iu?.iu_id)?.mount_path ?? '';
+        routes.push({ importName, importPath, mountPath });
       }
     }
 
-    const serverContent = [
-      `import { serve } from '@hono/node-server';`,
-      `import { app, mount } from './app.js';`,
-      `import { runMigrations } from './db.js';`,
-      ``,
-      `// Generated route modules`,
-      ...routeImports,
-      ``,
-      `// Mount routes`,
-      ...routeMounts,
-      ``,
-      `const port = parseInt(process.env.PORT ?? '3000', 10);`,
-      `runMigrations();`,
-      `console.log(\`Server running at http://localhost:\${port}\`);`,
-      `serve({ fetch: app.fetch, port });`,
-      ``,
-    ].join('\n');
-
-    files.set('src/server.ts', serverContent);
+    files.set('src/server.ts', rt.generateServerEntry(routes));
   }
 
   for (const svc of services) {

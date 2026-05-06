@@ -36,6 +36,24 @@ export interface Architecture {
   runtimeTargets: string[];
 }
 
+// ─── Route wiring (input to RuntimeTarget.generateServerEntry) ──────────────
+
+/**
+ * A single mounted route — pre-computed by scaffold from services and the
+ * interface registry, then handed to the runtime target's server generator.
+ *
+ * Decouples runtime targets from scaffold internals: a target only needs to
+ * know what to mount where, not how mount paths are derived.
+ */
+export interface RouteWiring {
+  /** Variable name for the import (e.g., 'projects', 'web_experience'). */
+  importName: string;
+  /** Path relative to src/ (e.g., './generated/todos/projects.js'). */
+  importPath: string;
+  /** Mount prefix from the interface registry (e.g., '/projects' or ''). */
+  mountPath: string;
+}
+
 // ─── Runtime Target (language/framework specific) ───────────────────────────
 
 export interface RuntimeTarget {
@@ -77,6 +95,13 @@ export interface RuntimeTarget {
    * referencing them get cleaned up.
    */
   stripImportPatterns: string[];
+  /**
+   * Generate the contents of src/server.ts for this runtime. Receives a
+   * flat list of routes to wire up; the runtime decides how to import,
+   * mount, and boot them. Hono targets emit serve({ fetch: app.fetch });
+   * a Bun target would emit Bun.serve(); Express would emit app.listen().
+   */
+  generateServerEntry(routes: RouteWiring[]): string;
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

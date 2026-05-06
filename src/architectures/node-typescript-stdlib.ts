@@ -82,6 +82,10 @@ Do NOT import DatabaseSync from node:sqlite. Do NOT instantiate a Database direc
   // Strip the runtime's actual driver (node:sqlite) instead of better-sqlite3.
   stripImportPatterns: ['hono', 'db.js', 'node:sqlite', 'zod'],
 
+  // Same Hono server pattern as node-typescript — only the SQLite driver
+  // (encapsulated inside src/db.ts) differs between targets.
+  generateServerEntry: nodeTypescript.generateServerEntry,
+
   sharedFiles: {
     ...nodeTypescript.sharedFiles,
     'src/db.ts': DB_FILE,

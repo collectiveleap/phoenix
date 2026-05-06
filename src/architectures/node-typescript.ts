@@ -5,7 +5,7 @@
  * Stack: Hono (HTTP) + better-sqlite3 (DB) + Zod (validation)
  */
 
-import type { RuntimeTarget } from '../models/architecture.js';
+import type { RuntimeTarget, RouteWiring } from '../models/architecture.js';
 
 // ─── Module template (LLM fills in marked sections) ─────────────────────────
 
@@ -213,6 +213,35 @@ router.delete('/:id', (c) => {
 \`\`\`
 `;
 
+// ─── Server entry generator ─────────────────────────────────────────────────
+
+/**
+ * Build src/server.ts for a Hono + @hono/node-server target. Both
+ * node-typescript and node-typescript-stdlib reuse this — they share the
+ * server pattern; only the SQLite driver in src/db.ts differs between them.
+ */
+function generateHonoServerEntry(routes: RouteWiring[]): string {
+  const routeImports = routes.map(r => `import ${r.importName} from '${r.importPath}';`);
+  const routeMounts = routes.map(r => `mount('${r.mountPath}', ${r.importName});`);
+  return [
+    `import { serve } from '@hono/node-server';`,
+    `import { app, mount } from './app.js';`,
+    `import { runMigrations } from './db.js';`,
+    ``,
+    `// Generated route modules`,
+    ...routeImports,
+    ``,
+    `// Mount routes`,
+    ...routeMounts,
+    ``,
+    `const port = parseInt(process.env.PORT ?? '3000', 10);`,
+    `runMigrations();`,
+    `console.log(\`Server running at http://localhost:\${port}\`);`,
+    `serve({ fetch: app.fetch, port });`,
+    ``,
+  ].join('\n');
+}
+
 // ─── Export ─────────────────────────────────────────────────────────────────
 
 export const nodeTypescript: RuntimeTarget = {
@@ -248,6 +277,7 @@ import { z } from 'zod';
 Do NOT import Database from better-sqlite3. Do NOT create new Database(). Use the db import above.`,
 
   stripImportPatterns: ['hono', 'db.js', 'better-sqlite3', 'zod'],
+  generateServerEntry: generateHonoServerEntry,
 
   sharedFiles: {
     'src/db.ts': DB_FILE,
