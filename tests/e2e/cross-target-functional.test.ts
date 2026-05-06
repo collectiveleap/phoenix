@@ -32,10 +32,10 @@
  *      request order is identical and DB is fresh; only ISO-8601 timestamps
  *      need canonicalization.
  *
- *   5. Hono's default 404 returns text/plain "404 Not Found"; Express 5's
- *      returns text/html "Cannot GET /…". The canonicalizer drops 404
- *      bodies — we're asserting on application-defined behavior, not
- *      framework default error pages. Aligning that is a future iteration.
+ *   5. Each target's generateServerEntry registers a JSON 404 fallback
+ *      (`{error: 'Not Found'}`) after mounts, overriding the framework
+ *      default error page. That makes the 404 step a real equivalence
+ *      assertion rather than a status-only check.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -335,10 +335,6 @@ function normalizeHtml(body: unknown): unknown {
 }
 
 function canonicalizeResponse(r: CapturedResponse): CapturedResponse {
-  // Hono's default 404 is "404 Not Found" (text/plain); Express 5's default
-  // is "Cannot GET /<path>" (text/html). Aligning these would touch runtime
-  // app.ts files — separate concern. Compare status only.
-  if (r.status === 404) return { name: r.name, status: 404, body: '<404>' };
   return { name: r.name, status: r.status, body: normalizeHtml(canonicalize(r.body)) };
 }
 
