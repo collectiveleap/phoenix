@@ -79,6 +79,9 @@ import { z } from 'zod';
 \`\`\`
 Do NOT import DatabaseSync from node:sqlite. Do NOT instantiate a Database directly. Use the db import above.`,
 
+  // Strip the runtime's actual driver (node:sqlite) instead of better-sqlite3.
+  stripImportPatterns: ['hono', 'db.js', 'node:sqlite', 'zod'],
+
   sharedFiles: {
     ...nodeTypescript.sharedFiles,
     'src/db.ts': DB_FILE,

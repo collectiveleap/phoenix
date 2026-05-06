@@ -64,6 +64,19 @@ export interface RuntimeTarget {
    * that's specific to this target's package set. Ignored in stub mode.
    */
   mandatoryImports: string;
+  /**
+   * Import-path substrings that `assembleFromTemplate` strips from LLM
+   * output before splicing it into the module template. The template
+   * re-provides these imports verbatim, so any LLM-added duplicates would
+   * conflict.
+   *
+   * Each entry is matched as a substring against the trimmed import line
+   * (e.g., 'better-sqlite3' matches `import Database from 'better-sqlite3'`).
+   *
+   * Should include the runtime's own driver package(s) so LLM hallucinations
+   * referencing them get cleaned up.
+   */
+  stripImportPatterns: string[];
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

@@ -247,6 +247,8 @@ import { z } from 'zod';
 \`\`\`
 Do NOT import Database from better-sqlite3. Do NOT create new Database(). Use the db import above.`,
 
+  stripImportPatterns: ['hono', 'db.js', 'better-sqlite3', 'zod'],
+
   sharedFiles: {
     'src/db.ts': DB_FILE,
     'src/app.ts': APP_FILE,

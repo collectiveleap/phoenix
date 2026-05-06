@@ -165,7 +165,7 @@ async function generateWithLLM(
       maxTokens: 8192,
     });
 
-    code = assembleFromTemplate(template, raw, iu);
+    code = assembleFromTemplate(template, raw, iu, target!.runtime.stripImportPatterns);
   } else {
     // Freeform mode
     code = cleanCodeResponse(await llm.generate(prompt, {
@@ -190,7 +190,7 @@ async function generateWithLLM(
       });
 
       if (template) {
-        code = assembleFromTemplate(template, fixResponse, iu);
+        code = assembleFromTemplate(template, fixResponse, iu, target!.runtime.stripImportPatterns);
       } else {
         code = cleanCodeResponse(fixResponse);
       }
@@ -218,7 +218,12 @@ async function generateWithLLM(
  * This is more robust than section parsing — accepts whatever the LLM
  * generates and fixes the structural parts that must be exact.
  */
-function assembleFromTemplate(template: string, llmResponse: string, iu: ImplementationUnit): string {
+function assembleFromTemplate(
+  template: string,
+  llmResponse: string,
+  iu: ImplementationUnit,
+  stripImportPatterns: string[],
+): string {
   let code = cleanCodeResponse(llmResponse);
 
   // Extract the template's fixed header (imports)
@@ -226,17 +231,15 @@ function assembleFromTemplate(template: string, llmResponse: string, iu: Impleme
   const headerEnd = templateLines.findIndex(l => l.includes('__MIGRATIONS__'));
   const templateHeader = templateLines.slice(0, Math.max(headerEnd, 0)).join('\n');
 
-  // Strip LLM's import lines — we'll use the template's
+  // Strip LLM's import lines — we'll use the template's. The runtime target
+  // owns the substring patterns to match (e.g., its driver package name).
   const codeLines = code.split('\n');
   const bodyLines = codeLines.filter(line => {
     const trimmed = line.trim();
-    // Remove import statements that the template already provides
-    if (trimmed.startsWith('import ') && (
-      trimmed.includes('hono') ||
-      trimmed.includes('db.js') ||
-      trimmed.includes('better-sqlite3') ||
-      trimmed.includes('zod')
-    )) return false;
+    if (trimmed.startsWith('import ') &&
+        stripImportPatterns.some(p => trimmed.includes(p))) {
+      return false;
+    }
     return true;
   });
   let body = bodyLines.join('\n').trim();
