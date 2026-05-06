@@ -257,9 +257,9 @@ function cmdInit(args?: string[]): void {
   if (archArg) {
     const arch = resolveTarget(archArg);
     if (!arch) {
-      console.log(red(`✖ Unknown architecture: ${archArg}`));
-      console.log(`  Available: ${listArchitectures().join(', ')}`);
-      return;
+      console.error(red(`✖ Unknown architecture: ${archArg}`));
+      console.error(`  Available: ${listArchitectures().join(', ')}`);
+      process.exit(1);
     }
     const configPath = join(phoenixDir, 'config.json');
     const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
@@ -1044,8 +1044,8 @@ async function cmdRegen(args: string[]): Promise<void> {
     : ius;
 
   if (targetIUs.length === 0) {
-    console.log(red(`✖ No IU matching: ${iuFilter}`));
-    return;
+    console.error(red(`✖ No IU matching: ${iuFilter}`));
+    process.exit(1);
   }
 
   const llm = forceStubs ? null : resolveProvider(phoenixDir);
@@ -1066,8 +1066,8 @@ async function cmdRegen(args: string[]): Promise<void> {
   if (targetArg) {
     regenArch = resolveTarget(targetArg);
     if (!regenArch) {
-      console.log(red(`✖ Unknown target: ${targetArg}`));
-      return;
+      console.error(red(`✖ Unknown target: ${targetArg}`));
+      process.exit(1);
     }
     console.log(`  ${dim('Target (override):')} ${cyan(regenArch.architecture.name)} / ${cyan(regenArch.runtime.name)}`);
   } else if (existsSync(configPath)) {
