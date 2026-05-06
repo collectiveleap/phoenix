@@ -181,10 +181,18 @@ export function generateScaffold(
   // Root index
   files.set('src/generated/index.ts', generateRootIndex(services));
 
-  // Project config
-  files.set('package.json', generatePackageJson(services, projectName, target));
-  files.set('tsconfig.json', generateTsConfig());
-  files.set('vitest.config.ts', generateVitestConfig());
+  // Project config — when a runtime target is set, delegate file generation
+  // to it (each runtime owns its manifest format and language config). The
+  // !target legacy path keeps the in-scaffold helpers for backward compat.
+  if (target) {
+    for (const [path, content] of target.runtime.generateProjectFiles(projectName, services)) {
+      files.set(path, content);
+    }
+  } else {
+    files.set('package.json', generatePackageJson(services, projectName, null));
+    files.set('tsconfig.json', generateTsConfig());
+    files.set('vitest.config.ts', generateVitestConfig());
+  }
 
   return { files };
 }

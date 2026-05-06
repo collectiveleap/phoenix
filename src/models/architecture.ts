@@ -141,6 +141,16 @@ export interface RuntimeTarget {
    * (Hono routers expose .fetch; Express routers don't).
    */
   generateServiceTests(svc: ServiceDescriptor): string;
+  /**
+   * Generate the project-config files this runtime needs at the project
+   * root: manifest (package.json / pyproject.toml / go.mod), language
+   * config (tsconfig.json), test config, etc. Each runtime owns its
+   * complete set; scaffold splats them into the project verbatim.
+   *
+   * Returns a Map of <relative-path, content>. Path keys are relative
+   * to the project root.
+   */
+  generateProjectFiles(projectName: string, services: ServiceDescriptor[]): Map<string, string>;
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

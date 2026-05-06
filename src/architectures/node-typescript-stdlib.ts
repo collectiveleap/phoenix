@@ -13,7 +13,7 @@
  */
 
 import type { RuntimeTarget } from '../models/architecture.js';
-import { nodeTypescript } from './node-typescript.js';
+import { nodeTypescript, makeNodeTsProjectFiles } from './node-typescript.js';
 
 // ─── Shared db.ts using node:sqlite (stdlib, Node ≥22) ──────────────────────
 
@@ -87,6 +87,13 @@ Do NOT import DatabaseSync from node:sqlite. Do NOT instantiate a Database direc
   generateServerEntry: nodeTypescript.generateServerEntry,
   generateModuleStub: nodeTypescript.generateModuleStub,
   generateServiceTests: nodeTypescript.generateServiceTests,
+  // Same project-file shape as node-typescript but with the stdlib's
+  // pruned package set (no better-sqlite3 / @types/better-sqlite3).
+  generateProjectFiles: makeNodeTsProjectFiles(
+    packagesNoSqlite,
+    devPackagesNoSqlite,
+    nodeTypescript.packageExtras,
+  ),
 
   sharedFiles: {
     ...nodeTypescript.sharedFiles,

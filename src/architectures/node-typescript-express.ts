@@ -20,7 +20,7 @@ import type {
   ServiceDescriptor,
 } from '../models/architecture.js';
 import type { ImplementationUnit } from '../models/iu.js';
-import { nodeTypescript } from './node-typescript.js';
+import { nodeTypescript, makeNodeTsProjectFiles } from './node-typescript.js';
 
 // ─── Module template (LLM fills in marked sections) ─────────────────────────
 
@@ -304,25 +304,28 @@ router.delete('/:id', (req, res) => {
 
 // ─── Export ─────────────────────────────────────────────────────────────────
 
+const EXPRESS_PACKAGES = {
+  'express': '^5.0.0',
+  'better-sqlite3': '^11.7.0',
+  'zod': '^3.24.0',
+};
+
+const EXPRESS_DEV_PACKAGES = {
+  'typescript': '^5.4.0',
+  'vitest': '^2.0.0',
+  '@types/node': '^22.0.0',
+  '@types/express': '^5.0.0',
+  '@types/better-sqlite3': '^7.6.0',
+  'tsx': '^4.0.0',
+};
+
 export const nodeTypescriptExpress: RuntimeTarget = {
   name: 'node-typescript-express',
   description: 'Node.js + TypeScript — Express 5, better-sqlite3, Zod',
   language: 'typescript',
 
-  packages: {
-    'express': '^5.0.0',
-    'better-sqlite3': '^11.7.0',
-    'zod': '^3.24.0',
-  },
-
-  devPackages: {
-    'typescript': '^5.4.0',
-    'vitest': '^2.0.0',
-    '@types/node': '^22.0.0',
-    '@types/express': '^5.0.0',
-    '@types/better-sqlite3': '^7.6.0',
-    'tsx': '^4.0.0',
-  },
+  packages: EXPRESS_PACKAGES,
+  devPackages: EXPRESS_DEV_PACKAGES,
 
   moduleTemplate: MODULE_TEMPLATE,
   promptExtension: PROMPT_EXTENSION,
@@ -351,4 +354,11 @@ Do NOT call express() directly. Do NOT create a new app instance. Use the Router
   generateServerEntry: generateExpressServerEntry,
   generateModuleStub: generateExpressModuleStub,
   generateServiceTests: generateExpressServiceTests,
+  // Same project-file shape as node-typescript (Node + TS + tsx + vitest)
+  // but with Express's package set instead of Hono's.
+  generateProjectFiles: makeNodeTsProjectFiles(
+    EXPRESS_PACKAGES,
+    EXPRESS_DEV_PACKAGES,
+    nodeTypescript.packageExtras,
+  ),
 };
