@@ -36,6 +36,31 @@ export interface Architecture {
   runtimeTargets: string[];
 }
 
+import type { ImplementationUnit } from './iu.js';
+
+// ─── Service descriptor (input to RuntimeTarget.generateServiceTests) ───────
+
+/**
+ * A logical service — a directory under src/generated/ containing one or
+ * more IU module files. Pre-computed by scaffold from the IU plan, then
+ * passed to runtime methods that need to know about the service's modules.
+ *
+ * Lives here (rather than in scaffold.ts) so the RuntimeTarget interface
+ * can reference it without a circular import.
+ */
+export interface ServiceDescriptor {
+  /** Service name, e.g. "api-gateway" */
+  name: string;
+  /** Directory under src/generated/, e.g. "api-gateway" */
+  dir: string;
+  /** Module file names (without path prefix), e.g. ["authentication.ts", "rate-limiting.ts"] */
+  modules: string[];
+  /** The IUs belonging to this service */
+  ius: ImplementationUnit[];
+  /** Default port for this service */
+  port: number;
+}
+
 // ─── Route wiring (input to RuntimeTarget.generateServerEntry) ──────────────
 
 /**
@@ -102,6 +127,20 @@ export interface RuntimeTarget {
    * a Bun target would emit Bun.serve(); Express would emit app.listen().
    */
   generateServerEntry(routes: RouteWiring[]): string;
+  /**
+   * Generate a minimal stub module body for the given IU. Used in stub
+   * mode (no LLM) to produce a syntactically valid module that exports
+   * whatever the framework conventionally expects (Hono router, Express
+   * router, FastAPI APIRouter, etc.). Must include the standard `_phoenix`
+   * metadata constant for traceability.
+   */
+  generateModuleStub(iu: ImplementationUnit): string;
+  /**
+   * Generate the per-service vitest file content for IUs in this runtime.
+   * The runtime owns the assertions because they're framework-shaped
+   * (Hono routers expose .fetch; Express routers don't).
+   */
+  generateServiceTests(svc: ServiceDescriptor): string;
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

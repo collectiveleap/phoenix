@@ -85,6 +85,8 @@ Do NOT import DatabaseSync from node:sqlite. Do NOT instantiate a Database direc
   // Same Hono server pattern as node-typescript — only the SQLite driver
   // (encapsulated inside src/db.ts) differs between targets.
   generateServerEntry: nodeTypescript.generateServerEntry,
+  generateModuleStub: nodeTypescript.generateModuleStub,
+  generateServiceTests: nodeTypescript.generateServiceTests,
 
   sharedFiles: {
     ...nodeTypescript.sharedFiles,
