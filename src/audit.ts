@@ -430,7 +430,7 @@ function emptyEvalCoverage(iu: ImplementationUnit): EvaluationCoverage {
     iu_name: iu.name,
     total_evaluations: 0,
     by_binding: { domain_rule: 0, boundary_contract: 0, constraint: 0, invariant: 0, failure_mode: 0 },
-    by_origin: { specified: 0, characterization: 0, incident: 0, audit: 0 },
+    by_origin: { specified: 0, characterization: 0, observed: 0, incident: 0, audit: 0 },
     canon_ids_covered: [],
     canon_ids_uncovered: iu.source_canon_ids,
     coverage_ratio: 0,

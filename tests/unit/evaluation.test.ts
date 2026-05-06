@@ -29,21 +29,25 @@ function makeIU(overrides: Partial<ImplementationUnit> = {}): ImplementationUnit
   };
 }
 
-function makeEval(overrides: Partial<Evaluation> = {}): Evaluation {
+function makeEval(overrides: Partial<Evaluation> & { binding?: 'boundary_contract' | 'failure_mode' | 'invariant' | 'domain_rule' | 'constraint' } = {}): Evaluation {
+  const { binding, ...rest } = overrides;
   return {
     eval_id: 'eval-1',
-    name: 'Auth rejects expired tokens',
+    name: 'auth-rejects-expired-tokens',
     iu_id: 'iu-auth',
-    binding: 'boundary_contract',
+    subject: {
+      spec_section: ['Auth'],
+      describes: 'auth rejects expired tokens',
+      binding: binding ?? 'boundary_contract',
+    },
     origin: 'specified',
-    assertion: 'Expired tokens receive 401',
-    given: 'A token that expired 1 minute ago',
-    when: 'The token is presented for authentication',
-    then: 'The system returns a 401 Unauthorized response',
+    given: [{ text: 'a token that expired 1 minute ago' }],
+    when: [{ text: 'the token is presented for authentication' }],
+    then: [{ text: 'the system returns a 401 Unauthorized response' }],
     canon_ids: ['canon-1'],
     conservation: false,
     created_at: new Date().toISOString(),
-    ...overrides,
+    ...rest,
   };
 }
 

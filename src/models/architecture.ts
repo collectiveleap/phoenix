@@ -14,6 +14,40 @@
  *         → Generated Code
  */
 
+// ─── Eval runner ────────────────────────────────────────────────────────────
+//
+// The architecture provides a `runEvaluation` method that takes a durable
+// surface-agnostic Evaluation (parsed Given/When/Then in domain terms) and
+// projects it onto the architecture's surface. For web-api: HTTP requests
+// against `surface.port`. For a future cli-tool: spawn the binary; capture
+// stdin/stdout/argv/exit code. The same Evaluation works against either.
+//
+// See docs/SUCCESS-CRITERIA.md for the design rationale.
+
+import type { Evaluation } from './evaluation.js';
+
+/** What surface the eval runner targets. For web-api: an HTTP port. */
+export interface EvalSurface {
+  /** HTTP port the regenerated app is listening on. */
+  port: number;
+}
+
+/** What the runner needs to know about the resolved canonical/IU graph. */
+export interface EvalContext {
+  /** All IUs in the current canonical graph. */
+  ius: Array<{ iu_id: string; name: string }>;
+  /** Interface registry — for mapping IU/section names to mount paths. */
+  interfaces: Array<{ iu_id: string; name: string; mount_path: string; role: 'api' | 'web-ui' }>;
+}
+
+/** Outcome of running one Evaluation against a surface. */
+export interface EvalResult {
+  eval_id: string;
+  name: string;
+  pass: boolean;
+  reason?: string;
+}
+
 // ─── Architecture (system shape, language-agnostic) ─────────────────────────
 
 export interface Architecture {
@@ -34,6 +68,21 @@ export interface Architecture {
 
   /** Available runtime targets for this architecture */
   runtimeTargets: string[];
+
+  /**
+   * Run a durable Evaluation against the regenerated implementation's
+   * surface. The Evaluation is surface-agnostic (Given/When/Then in domain
+   * language); the architecture provides step definitions that translate
+   * each step into surface operations and assertions.
+   *
+   * Returns one EvalResult per evaluation. The deletion test asserts that
+   * every result.pass is true.
+   */
+  runEvaluation(
+    evaluation: Evaluation,
+    surface: EvalSurface,
+    context: EvalContext,
+  ): Promise<EvalResult>;
 }
 
 import type { ImplementationUnit } from './iu.js';

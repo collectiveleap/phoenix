@@ -1,13 +1,14 @@
 /**
- * Evaluation Store — persists durable behavioral evaluations.
- *
- * Evaluations are versioned independently of implementation.
- * They are the system's constitution, not the implementation's unit tests.
+ * Evaluation Store — persists the *resolved* (ephemeral) view of evaluations
+ * inside .phoenix/. The durable source files live at the project root in
+ * `evals/*.feature` (per docs/SUCCESS-CRITERIA.md). Bootstrap parses those
+ * sources, runs the simple resolver to attach iu_id / canon_ids to each
+ * Evaluation, and writes the result here. The store is regenerable.
  */
 
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Evaluation, EvaluationCoverage, EvaluationGap } from '../models/evaluation.js';
+import type { Evaluation, EvaluationBinding, EvaluationOrigin, EvaluationCoverage, EvaluationGap } from '../models/evaluation.js';
 import type { ImplementationUnit } from '../models/iu.js';
 
 interface EvalIndex {
@@ -18,9 +19,11 @@ export class EvaluationStore {
   private indexPath: string;
 
   constructor(phoenixRoot: string) {
-    const dir = join(phoenixRoot, 'evaluations');
+    // Path: .phoenix/evals/index.json (renamed from .phoenix/evaluations/evaluations.json
+    // for parity with the top-level durable evals/ directory).
+    const dir = join(phoenixRoot, 'evals');
     mkdirSync(dir, { recursive: true });
-    this.indexPath = join(dir, 'evaluations.json');
+    this.indexPath = join(dir, 'index.json');
   }
 
   private load(): EvalIndex {
@@ -69,6 +72,14 @@ export class EvaluationStore {
     return this.load().evaluations.filter(e => e.conservation);
   }
 
+  /**
+   * Replace the entire index with the provided list. Used by bootstrap when
+   * (re)loading durable evaluations from the project's `evals/` directory.
+   */
+  replaceAll(evaluations: Evaluation[]): void {
+    this.save({ evaluations });
+  }
+
   remove(evalId: string): boolean {
     const index = this.load();
     const before = index.evaluations.length;
@@ -87,19 +98,19 @@ export class EvaluationStore {
     const evals = this.getByIU(iu.iu_id);
     const gaps: EvaluationGap[] = [];
 
-    // Count by binding
-    const byBinding: Record<string, number> = {
+    // Count by binding (in subject for the new model)
+    const byBinding: Record<EvaluationBinding, number> = {
       domain_rule: 0, boundary_contract: 0, constraint: 0, invariant: 0, failure_mode: 0,
     };
-    const byOrigin: Record<string, number> = {
-      specified: 0, characterization: 0, incident: 0, audit: 0,
+    const byOrigin: Record<EvaluationOrigin, number> = {
+      specified: 0, characterization: 0, observed: 0, incident: 0, audit: 0,
     };
     const coveredCanonIds = new Set<string>();
 
     for (const e of evals) {
-      byBinding[e.binding] = (byBinding[e.binding] ?? 0) + 1;
+      byBinding[e.subject.binding] = (byBinding[e.subject.binding] ?? 0) + 1;
       byOrigin[e.origin] = (byOrigin[e.origin] ?? 0) + 1;
-      for (const cid of e.canon_ids) coveredCanonIds.add(cid);
+      for (const cid of e.canon_ids ?? []) coveredCanonIds.add(cid);
     }
 
     // Check for missing coverage
@@ -160,8 +171,8 @@ export class EvaluationStore {
       iu_id: iu.iu_id,
       iu_name: iu.name,
       total_evaluations: evals.length,
-      by_binding: byBinding as Record<any, number>,
-      by_origin: byOrigin as Record<any, number>,
+      by_binding: byBinding,
+      by_origin: byOrigin,
       canon_ids_covered: [...coveredCanonIds],
       canon_ids_uncovered: uncoveredCanonIds,
       coverage_ratio: coverageRatio,

@@ -65,6 +65,30 @@ import type { ResolvedTarget } from './models/architecture.js';
 import { auditIU, auditAll } from './audit.js';
 import type { AuditResult, ReadinessLevel } from './audit.js';
 import { EvaluationStore } from './store/evaluation-store.js';
+import { loadEvaluationsFromDir } from './eval-parser.js';
+import type { Evaluation } from './models/evaluation.js';
+
+/**
+ * Simple resolver — match each evaluation's subject.spec_section[0] against
+ * an IU name; populate iu_id, canon_ids, and resolved_at. Iter 13's
+ * canonicalizer integration replaces this with a richer resolution path.
+ */
+function resolveEvaluations(
+  evals: Evaluation[],
+  ius: ImplementationUnit[],
+): Evaluation[] {
+  const now = new Date().toISOString();
+  return evals.map(e => {
+    const target = (e.subject.spec_section[0] ?? '').toLowerCase();
+    const match = ius.find(iu => iu.name.toLowerCase() === target);
+    return {
+      ...e,
+      iu_id: match?.iu_id,
+      canon_ids: match?.source_canon_ids,
+      resolved_at: now,
+    };
+  });
+}
 import { NegativeKnowledgeStore } from './store/negative-knowledge-store.js';
 import type { PaceLayerMetadata } from './models/pace-layer.js';
 
@@ -365,6 +389,23 @@ async function cmdBootstrap(): Promise<void> {
     console.log(`      ${dim('·')} ${iu.name} ${dim(`(${iu.risk_tier})`)} → ${iu.output_files.join(', ')}`);
   }
   console.log();
+
+  // Step 3.5: Load durable evaluations from `evals/*.feature` and resolve
+  // each evaluation's subject against the freshly-planned IUs. Resolved
+  // entries are written to .phoenix/evals/index.json (ephemeral); the
+  // sources at evals/*.feature stay durable. See docs/SUCCESS-CRITERIA.md.
+  const evalsDir = join(projectRoot, 'evals');
+  if (existsSync(evalsDir)) {
+    const durable = loadEvaluationsFromDir(evalsDir);
+    if (durable.length > 0) {
+      console.log(`  ${dim('Phase C.5:')} Eval resolution`);
+      const resolved = resolveEvaluations(durable, ius);
+      const evalStoreLocal = new EvaluationStore(phoenixDir);
+      evalStoreLocal.replaceAll(resolved);
+      const matched = resolved.filter(e => e.iu_id).length;
+      console.log(`    ${green('✔')} ${resolved.length} evaluation(s); ${matched} resolved to an IU`);
+    }
+  }
 
   // Step 4: Generate code
   const llm = resolveProvider(phoenixDir);
