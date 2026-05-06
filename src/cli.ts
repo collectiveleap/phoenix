@@ -1034,9 +1034,11 @@ async function cmdRegen(args: string[]): Promise<void> {
     return;
   }
 
-  // Parse --iu=<id> flag and --stubs flag
+  // Parse flags: --iu=<id>, --stubs, --target=<arch>/<runtime>, --out-dir=<path>
   const iuFilter = args.find(a => a.startsWith('--iu='))?.split('=')[1];
   const forceStubs = args.includes('--stubs');
+  const targetArg = args.find(a => a.startsWith('--target='))?.split('=')[1];
+  const outDirArg = args.find(a => a.startsWith('--out-dir='))?.split('=')[1];
   const targetIUs = iuFilter
     ? ius.filter(iu => iu.iu_id.startsWith(iuFilter) || iu.name === iuFilter)
     : ius;
@@ -1057,17 +1059,34 @@ async function cmdRegen(args: string[]): Promise<void> {
     const { hint } = describeAvailability();
     console.log(`  ${dim('Mode: stubs')}${forceStubs ? '' : ` ${dim('—')} ${dim(hint)}`}`);
   }
-  console.log();
 
-  // Load architecture
+  // Resolve architecture: --target= flag takes precedence over .phoenix/config.json
   const configPath = join(phoenixDir, 'config.json');
   let regenArch: ResolvedTarget | null = null;
-  if (existsSync(configPath)) {
+  if (targetArg) {
+    regenArch = resolveTarget(targetArg);
+    if (!regenArch) {
+      console.log(red(`✖ Unknown target: ${targetArg}`));
+      return;
+    }
+    console.log(`  ${dim('Target (override):')} ${cyan(regenArch.architecture.name)} / ${cyan(regenArch.runtime.name)}`);
+  } else if (existsSync(configPath)) {
     try {
       const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
       if (cfg.architecture) regenArch = resolveTarget(cfg.architecture);
     } catch { /* ignore */ }
   }
+
+  // Resolve output root: --out-dir treats <projectRoot>/<dir> as alternate write root.
+  // Note: we deliberately suppress typecheck-retry when writing outside projectRoot,
+  // because the alternate dir typically lacks node_modules/tsconfig and typecheck
+  // would write artifacts back into projectRoot, polluting the durable copy.
+  const outRoot = outDirArg ? join(projectRoot, outDirArg) : projectRoot;
+  const usingAltRoot = outRoot !== projectRoot;
+  if (usingAltRoot) {
+    console.log(`  ${dim('Output dir:')} ${cyan(outDirArg!)} ${dim('(typecheck-retry disabled)')}`);
+  }
+  console.log();
 
   const regenInterfaces = deriveInterfaces(ius, canonNodes);
 
@@ -1075,7 +1094,8 @@ async function cmdRegen(args: string[]): Promise<void> {
     llm: llm ?? undefined,
     canonNodes,
     allIUs: ius,
-    projectRoot,
+    // When writing to an alternate root, omit projectRoot so regen.ts skips typecheck.
+    projectRoot: usingAltRoot ? undefined : projectRoot,
     target: regenArch,
     interfaces: regenInterfaces,
     onProgress: (iu, status, msg) => {
@@ -1090,11 +1110,12 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   for (const result of results) {
     for (const [filePath, content] of result.files) {
-      const fullPath = join(projectRoot, filePath);
+      const fullPath = join(outRoot, filePath);
       mkdirSync(join(fullPath, '..'), { recursive: true });
       writeFileSync(fullPath, content, 'utf8');
     }
-    manifestManager.recordIU(result.manifest);
+    // Manifest tracks the durable artifact; do not record alt-root regens.
+    if (!usingAltRoot) manifestManager.recordIU(result.manifest);
 
     if (!llm) {
       const iu = targetIUs.find(i => i.iu_id === result.iu_id);
@@ -1111,7 +1132,7 @@ async function cmdRegen(args: string[]): Promise<void> {
   const services = deriveServices(allIUs);
   const scaffold = generateScaffold(services, basename(projectRoot), regenArch, allInterfaces);
   for (const [filePath, content] of scaffold.files) {
-    const fullPath = join(projectRoot, filePath);
+    const fullPath = join(outRoot, filePath);
     mkdirSync(join(fullPath, '..'), { recursive: true });
     writeFileSync(fullPath, content, 'utf8');
   }
@@ -1546,7 +1567,10 @@ ${bold('Canonical Graph:')}
 
 ${bold('Implementation:')}
   ${cyan('plan')}                  Plan Implementation Units from canonical graph
-  ${cyan('regen')} [--iu=<id>]    Regenerate code (all or specific IU)
+  ${cyan('regen')} [--iu=<id>] [--target=<arch>/<runtime>] [--out-dir=<path>]
+                       Regenerate code (all or specific IU). --target overrides the
+                       architecture from config; --out-dir writes to an alternate
+                       project root (typecheck-retry disabled).
                          ${dim('Uses LLM if ANTHROPIC_API_KEY or OPENAI_API_KEY is set')}
                          ${dim('--stubs  Force stub generation (skip LLM)')}
 

@@ -5,6 +5,7 @@
 import type { Architecture, RuntimeTarget, ResolvedTarget } from '../models/architecture.js';
 import { webApi } from './web-api.js';
 import { nodeTypescript } from './node-typescript.js';
+import { nodeTypescriptStdlib } from './node-typescript-stdlib.js';
 
 // ─── Architecture registry ──────────────────────────────────────────────────
 
@@ -16,6 +17,7 @@ const ARCHITECTURES: Record<string, Architecture> = {
 
 const RUNTIME_TARGETS: Record<string, RuntimeTarget> = {
   'node-typescript': nodeTypescript,
+  'node-typescript-stdlib': nodeTypescriptStdlib,
 };
 
 // ─── Public API ─────────────────────────────────────────────────────────────
