@@ -18,6 +18,12 @@ When the deletion test does *not* yet pass for a combination, that combination i
 
 The deletion test is not aspirational. It is the gate.
 
+### Verified passes
+
+| Architecture | Runtime target | Date | Run time | Notes |
+|---|---|---|---|---|
+| `web-api` | `node-typescript-stdlib` | 2026-05-06 | 2547s (~42 min) | **Suspect — needs re-verification after silent-fallback hardening lands.** First green run, but predates `regen_metadata.fell_back` so we cannot tell whether it passed from real LLM output or stub fallback. The 2026-05-06 `node-typescript` run exposed the silent-fallback bug (Web Experience IU stubbed after 64-min `claude` ETIMEDOUT while manifest claimed `claude-cli/sonnet`). Same pattern may have hidden in this run. |
+
 ## The Durable / Ephemeral Boundary
 
 Strict: only spec and evals are durable. Everything else regenerates from them.

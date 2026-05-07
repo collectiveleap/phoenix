@@ -13,6 +13,13 @@ export interface RegenMetadata {
   promptpack_hash: string;
   toolchain_version: string;
   generated_at: string;
+  /**
+   * True iff stub substitution replaced LLM output for this IU because the LLM
+   * call threw. Absent (not `false`) when the LLM call succeeded or was never
+   * attempted (forced-stub mode). Read this before trusting `model_id`: when
+   * `fell_back` is true the named provider did NOT produce the file content.
+   */
+  fell_back?: boolean;
 }
 
 export interface IUManifest {

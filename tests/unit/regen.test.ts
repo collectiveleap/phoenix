@@ -55,6 +55,30 @@ describe('generateIU', () => {
     expect(meta.promptpack_hash).toHaveLength(64);
     expect(meta.generated_at).toBeTruthy();
   });
+
+  it('does not set fell_back when no LLM was configured', async () => {
+    const iu = makeIU();
+    const result = await generateIU(iu);
+    expect(result.manifest.regen_metadata.fell_back).toBeUndefined();
+  });
+
+  it('sets fell_back=true when the LLM provider throws', async () => {
+    const iu = makeIU();
+    const throwingLLM = {
+      name: 'fake',
+      model: 'thrower',
+      generate: async () => { throw new Error('simulated ETIMEDOUT'); },
+    };
+    const errors: string[] = [];
+    const result = await generateIU(iu, {
+      llm: throwingLLM,
+      canonNodes: extractCanonicalNodes(parseSpec('# Auth\n\nUsers must authenticate.', 'test.md')),
+      onProgress: (_iu, status, msg) => { if (status === 'error' && msg) errors.push(msg); },
+    });
+    expect(result.manifest.regen_metadata.fell_back).toBe(true);
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]).toMatch(/simulated ETIMEDOUT/);
+  });
 });
 
 describe('generateAll', () => {

@@ -177,6 +177,20 @@ async function runDeletionTestForTarget(targetName: string, packageManager: Pack
     log('phoenix regen (LLM module generation — slow)…');
     execSync(`node ${JSON.stringify(cli)} regen`, opts);
 
+    // Trust gate: if any IU fell back to stubs, the LLM did NOT produce the
+    // code on disk and any green eval below would be false confidence. Fail
+    // here with a precise diagnostic instead of letting the run pass on stubs.
+    const manifestPath = join(dir, '.phoenix', 'manifests', 'generated_manifest.json');
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+        iu_manifests: Record<string, { iu_name: string; regen_metadata: { fell_back?: boolean; model_id: string } }>;
+      };
+      const fellBack = Object.values(manifest.iu_manifests)
+        .filter(m => m.regen_metadata.fell_back === true)
+        .map(m => `${m.iu_name} (claimed ${m.regen_metadata.model_id})`);
+      expect(fellBack, `LLM regen fell back to stubs for: ${fellBack.join(', ')}. Tmp dir preserved at ${dir}`).toEqual([]);
+    }
+
     // pnpm v10 blocks postinstall by default; allow native binaries.
     if (packageManager === 'pnpm') {
       const pkgPath = join(dir, 'package.json');

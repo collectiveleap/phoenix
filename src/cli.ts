@@ -466,7 +466,7 @@ async function cmdBootstrap(): Promise<void> {
     onProgress: (iu, status, msg) => {
       if (status === 'start') process.stdout.write(`    ⏳ ${iu.name}…`);
       else if (status === 'done') process.stdout.write(` ${green('✔')}\n`);
-      else if (status === 'error') process.stdout.write(` ${red('✖')} ${dim(msg || 'failed, using stub')}\n`);
+      else if (status === 'error') process.stderr.write(` ${red('✖')} ${dim(msg || 'failed, using stub')}\n`);
     },
   };
 
@@ -513,6 +513,14 @@ async function cmdBootstrap(): Promise<void> {
   console.log(green('  ✔ Bootstrap complete.'));
   console.log(`    State: ${cyan(machine.getState())}`);
   console.log(`    Run ${cyan('phoenix status')} to see the trust dashboard.`);
+
+  // Exit non-zero if every IU fell back to stubs while an LLM was configured.
+  // See cmdRegen for rationale; the same trust gap applies to bootstrap.
+  if (llm && regenResults.length > 0 && regenResults.every(r => r.manifest.regen_metadata.fell_back === true)) {
+    process.stderr.write(`\n${red('✖')} ${red('All IUs fell back to stubs.')} ${dim('Provider configured but no IU produced LLM output.')}\n`);
+    process.stderr.write(`  ${dim('Common causes:')} ${dim('expired auth, rate limit, network unreachable, ETIMEDOUT.')}\n`);
+    process.exit(1);
+  }
 }
 
 function cmdStatus(): void {
@@ -1142,7 +1150,7 @@ async function cmdRegen(args: string[]): Promise<void> {
     onProgress: (iu, status, msg) => {
       if (status === 'start') process.stdout.write(`  ⏳ ${iu.name}…`);
       else if (status === 'done') process.stdout.write(` ${green('✔')}\n`);
-      else if (status === 'error') process.stdout.write(` ${red('✖')} ${dim(msg || 'failed, using stub')}\n`);
+      else if (status === 'error') process.stderr.write(` ${red('✖')} ${dim(msg || 'failed, using stub')}\n`);
     },
   };
 
@@ -1180,6 +1188,17 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   console.log();
   console.log(`  ${dim(`${results.length} IU(s) regenerated. Scaffold updated.`)}`);
+
+  // Exit non-zero if every IU fell back to stubs while an LLM was configured.
+  // A full fallback is almost always a config / auth problem (rate limit,
+  // unauthenticated CLI, network blackhole) — not transient LLM hiccups.
+  // Silent stub-only output passes downstream tests that don't probe the
+  // affected surface and produces a manifest that lies about provenance.
+  if (llm && results.length > 0 && results.every(r => r.manifest.regen_metadata.fell_back === true)) {
+    process.stderr.write(`\n${red('✖')} ${red('All IUs fell back to stubs.')} ${dim('Provider configured but no IU produced LLM output.')}\n`);
+    process.stderr.write(`  ${dim('Common causes:')} ${dim('expired auth, rate limit, network unreachable, ETIMEDOUT.')}\n`);
+    process.exit(1);
+  }
 }
 
 function cmdDrift(): void {

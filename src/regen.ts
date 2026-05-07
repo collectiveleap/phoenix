@@ -54,6 +54,7 @@ export interface RegenContext {
 export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Promise<RegenResult> {
   const files = new Map<string, string>();
   const modelId = ctx?.llm ? `${ctx.llm.name}/${ctx.llm.model}` : 'stub-generator/1.0';
+  let fellBack = false;
 
   for (const outputPath of iu.output_files) {
     let content: string;
@@ -66,7 +67,7 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         ctx.onProgress?.(iu, 'error', msg);
-        // Fall back to stub on LLM failure
+        fellBack = true;
         content = ctx.target ? ctx.target.runtime.generateModuleStub(iu) : generateModule(iu);
       }
     } else {
@@ -94,6 +95,7 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     promptpack_hash: promptpackHash,
     toolchain_version: TOOLCHAIN_VERSION,
     generated_at: now,
+    ...(fellBack ? { fell_back: true } : {}),
   };
 
   return {

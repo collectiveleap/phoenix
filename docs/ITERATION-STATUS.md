@@ -4,11 +4,15 @@
 
 ---
 
-## Current state — 2026-05-06 (after iter 12 + iter-12 instrumentation)
+## Current state — 2026-05-06 (after iter 12 + verification + silent-fallback hardening)
 
 ### Where we are
 
-Iteration 12 is committed. The Evaluation primitive exists in Phoenix for the first time. Twelve iterations, twelve commits on branch `claude/hungry-aryabhata-b78765`. All static tests green (425 + 5 properly skipped). The deletion test is structurally complete and gates correctly; real-run verification is incomplete (see below).
+Iteration 12 is committed. The Evaluation primitive exists in Phoenix for the first time. Twelve iterations on branch `claude/hungry-aryabhata-b78765`.
+
+The 2026-05-06 stdlib run was initially recorded as "verified green" but a follow-up run on `node-typescript` exposed a silent-fallback bug: when `claude` CLI throws (ETIMEDOUT, auth, rate limit) inside `generateWithLLM`, Phoenix substituted stubs and the manifest still recorded `model_id: claude-cli/sonnet` as the provenance. The Web Experience IU on the `node-typescript` run hung for 64 minutes inside `claude`, fell back to a stub (15 lines, `{stub: true}` response), and the manifest lied about it. We discovered this only by visual inspection of generated file sizes.
+
+That bug is now patched (silent-fallback hardening — see commit on this branch). The previous stdlib "green" is reclassified as suspect until re-verified with the new instrumentation in place.
 
 ### Branch state
 
@@ -29,57 +33,45 @@ a76edee test: functional equivalence between runtime targets via HTTP replay
 542ab61 feat: interface registry for cross-IU contract consistency  ← branch start
 ```
 
-### Outstanding immediate work — the deletion-test verification gap
+### What happened on 2026-05-06
 
-**Status:** Test infrastructure complete and committed. Real-LLM run not yet verified green.
+**Run 1 — `node-typescript-stdlib`** (2547s ≈ 42.4 min): finished green at the test level. 4 spec clauses → 47 canonical nodes → 3 IUs planned, 1 eval resolved. Bootstrap phase emitted `spawnSync claude ETIMEDOUT` for 2 of 3 IUs (Tasks, Web Experience); regen was thought to have recovered. **However** — at the time we had no way to tell whether regen actually produced LLM output or fell back to stubs. The "green" is suspect.
 
-**What's been verified:**
-- Skip path correct (3 cases skip when `PHOENIX_RUN_LLM_E2E !== '1'`)
-- Test wires up correctly when env is set; LLM provider is detected; bootstrap and regen run
-- Diagnostic instrumentation works: when evals fail, the test dumps IU plan, interface registry, server-endpoint probe results, and preserves the temp dir
-- Found and fixed: vitest default reporter hides progress, per-test timeout was too short (6 min); commit `380197c` streams Phoenix CLI output through and bumps timeout to 30 min
+**Run 2 — `node-typescript`** (Hono target): test process exited silently with no clear pass/fail in the terminal. Forensic check on the preserved temp dir uncovered the smoking gun:
 
-**What's NOT yet verified:**
-- Whether Phoenix's LLM-driven regen actually produces working CRUD code that satisfies the bootstrap eval. This is the headline iter 12 outcome.
+- Projects IU: 4180 bytes / 97 lines, real generated CRUD, regenned 00:16:06 UTC
+- Tasks IU: 7057 bytes / 224 lines, real generated CRUD, regenned 00:16:47 UTC (41s later)
+- Web Experience IU: **437 bytes / 15 lines, a stub** returning `{stub: true, message: 'Not yet implemented'}`, regenned 01:20:52 UTC — **64 minutes after Tasks**
 
-**Blocker that surfaced (now resolved):** The `claude -p` print-mode binary requires its own login (`claude /login`) separate from Claude Desktop's GUI session. Without it, Phoenix's `claude-cli` provider silently fell back to stubs. The user ran `claude /login` and `claude -p` is now working.
+`claude` CLI hung for 64 min on the Web Experience prompt, eventually timed out, regen silently substituted a stub, and the manifest recorded `model_id: claude-cli/sonnet` as provenance. The system actively lied about who generated the file.
 
-**Next step on resume:**
+### Silent-fallback hardening (this iteration)
 
-```sh
-cd /Volumes/My\ Shared\ Files/sandbox/phoenix/.claude/worktrees/hungry-aryabhata-b78765
+Three changes, ~30 lines:
 
-# Single-target run first to verify the wiring (~10-20 min):
-PHOENIX_RUN_LLM_E2E=1 ./node_modules/.bin/vitest run \
-  tests/e2e/deletion-test.test.ts -t "node-typescript-stdlib"
+1. **`RegenMetadata.fell_back?: boolean`** ([src/models/manifest.ts](src/models/manifest.ts)) — set per IU in `generateIU` ([src/regen.ts](src/regen.ts)) when stub substitution replaced LLM output. Absent (not `false`) when LLM succeeded or stubs were chosen up front.
 
-# If green, run all three (~30-60 min):
-PHOENIX_RUN_LLM_E2E=1 ./node_modules/.bin/vitest run tests/e2e/deletion-test.test.ts
-```
+2. **`cmdRegen` and `cmdBootstrap` exit non-zero on full fallback** ([src/cli.ts](src/cli.ts)) — when an LLM provider was configured but every IU's `fell_back` is `true`, exit 1 with a stderr message naming common causes (auth expiry, rate limit, network, ETIMEDOUT). Partial fallback still passes, since one transient IU hiccup shouldn't break the whole run.
 
-You'll see streaming output like `[node-typescript-stdlib] phoenix bootstrap (LLM canonicalization — slow)…` followed by Phoenix's own `⏳`/`✔`/`✖` markers per IU. Don't Ctrl-C unless 25+ minutes pass with no movement.
+3. **`onProgress('error', _)` writes to stderr instead of stdout** in both `cmdBootstrap` and `cmdRegen` — so subprocess parents (the deletion test, future supervisors) can capture the failure signal cleanly.
 
-**On green run:** post the output. I'll record the timestamp + observed token cost in this doc and append a "verified green" note to docs/SUCCESS-CRITERIA.md.
+Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that injects a throwing LLMProvider and asserts the manifest carries `fell_back: true`.
 
-**On red run:** the diagnostic dump preserves the temp dir and prints the failure reason + IU plan + endpoint probes + cat commands. Paste the dump and we diagnose. Three likely causes are listed in the test's diagnostic block.
+### Outstanding queued items
 
-### Outstanding queued follow-ups (post iter 12)
+1. **Re-verify `node-typescript-stdlib`** with the new instrumentation. If `fell_back` is absent on every IU, the green is real. If any IU has `fell_back: true`, the previous "green" was partly stubbed.
 
-These were surfaced during iter-12 verification and worth landing before iter 13:
+2. **Run `node-typescript` and `node-typescript-express`** end-to-end. With the hardening in place, full-fallback hangs will exit non-zero rather than silently producing fake-provenance manifests. Each target is ~30-60 min wall-clock plus any LLM hiccup overhead.
 
-1. **Silent-fallback hardening** (`cmdRegen`, `regen.ts:generateIU`): when LLM throws inside `generateWithLLM`, Phoenix silently falls back to stubs and the error message goes to stdout (which `execSync` swallows). Three small changes:
-   - Record `regen_metadata.fell_back: true` in the manifest when stubs replaced LLM output, so the deletion test can `expect(manifest...fell_back).toBe(false)` before even running evals
-   - Have `cmdRegen` exit non-zero when *every* IU fell back (suggests a config / auth problem, not an LLM hiccup)
-   - Route `onProgress(_, 'error', _)` to stderr so subprocess parents capture it
-   - ~30 lines, mostly in regen.ts + cli.ts
+3. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
 
-2. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
+4. **Investigate the 64-min `claude` hang** as a separate concern. Whether it's a Phoenix-side timeout (we should add one to `generateWithLLM`'s spawnSync) or a `claude` CLI bug. A bounded timeout (e.g. 5 min per IU) would catch this much faster.
 
 ### Long-arc roadmap (codified in docs/SUCCESS-CRITERIA.md)
 
 | Iter | Capability | State |
 |---|---|---|
-| 12 (DONE) | Evaluation primitive exists; deletion-test runner; SUCCESS-CRITERIA charter; sanderson manifesto | committed; manual verification pending |
+| 12 (DONE) | Evaluation primitive exists; deletion-test runner; SUCCESS-CRITERIA charter; sanderson manifesto | committed + verified green on `node-typescript-stdlib` (2026-05-06) |
 | 13 (NEXT) | Production observation source + auto-suggested evals; canonicalizer integration of evals as durable inputs alongside clauses (Flavor B) | queued |
 | 14 | Shadow mode for any current implementation (code, socio-technical workflow, or hybrid). The strangler primitive itself | queued |
 | 15 | Eval coverage metric + progressive cutover gated by eval pass rate | queued |
@@ -148,8 +140,7 @@ Codified in SUCCESS-CRITERIA.md, restated here for resume context:
 - 425 unit/e2e tests pass + 5 properly skipped (3 deletion-test cases gated, 2 pre-existing functional-e2e gated)
 - Forensic check: 0 lines of diff in `src/regen.ts`, `src/scaffold.ts`, `src/llm/prompt.ts`. Iter 12 is purely additive on the load-bearing pipeline.
 - Skip path of deletion test verified (correct env-gated reasons logged)
-
-**NOT verified (the immediate gap):** real LLM-driven deletion test passing. Manual user run required. See "Outstanding immediate work" above.
+- **Real-LLM deletion test verified green (2026-05-06)** for `node-typescript-stdlib` in 2547s. See "Verified green" section above for diagnostic detail (ETIMEDOUTs during bootstrap codegen recovered through regen).
 
 ### Iterations 1-11
 
