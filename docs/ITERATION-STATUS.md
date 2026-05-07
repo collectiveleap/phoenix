@@ -94,7 +94,7 @@ Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that in
 - `docs/sanderson.md` — user's manifesto (throughlines, collective leap, strangler-as-socio-technical, Food on the Table)
 - `PRD.md` — Phoenix's original PRD (still relevant, predates the eval work)
 - `docs/ARCHITECTURE.md` — Phoenix's existing architecture description
-- `~/.claude/plans/tidy-pondering-thompson.md` — iter-12 plan (kept current; updated whenever plan-mode is re-entered)
+- `.claude/plan.md` — in-repo resume anchor (kept current; updated whenever plan-mode is re-entered). See `CLAUDE.md` for the full resume-order convention.
 
 ### Operating principles for future iterations
 
@@ -120,7 +120,7 @@ Codified in SUCCESS-CRITERIA.md, restated here for resume context:
 1. Read this file first.
 2. Read `docs/SUCCESS-CRITERIA.md` (the charter).
 3. Read `docs/sanderson.md` (the manifesto).
-4. Read `~/.claude/plans/tidy-pondering-thompson.md` (the iter-12 plan).
+4. Read `.claude/plan.md` (the in-repo iter plan).
 5. Continue from "Next step on resume" above.
 
 ---
