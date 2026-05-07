@@ -8,7 +8,7 @@
 
 **Repo**: `/Volumes/My Shared Files/sandbox/phoenix/.claude/worktrees/hungry-aryabhata-b78765`
 **Branch**: `claude/hungry-aryabhata-b78765`
-**Current iteration**: 12 + silent-fallback hardening + timeout fix. **First canonical verified-green deletion test on 2026-05-07 (3075s) for `web-api/node-typescript-stdlib`** — full closed loop validated, no stub fallback, eval passed. The ground under iters 13-17+ is now empirical, not aspirational.
+**Current iteration**: 12 + silent-fallback hardening + timeout fix. **All 3 runtime targets in `web-api` architecture verified-green on 2026-05-07** — `node-typescript-stdlib` (3075s), `node-typescript` Hono (2460s), `node-typescript-express` (3728s). Iter 7's "abstraction is load-bearing" claim is now empirically validated under real LLM regeneration. The ground under iters 13-17+ is empirical.
 
 **On resume, read these in order:**
 1. This file (you're here)

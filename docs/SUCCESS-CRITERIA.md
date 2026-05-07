@@ -22,7 +22,11 @@ The deletion test is not aspirational. It is the gate.
 
 | Architecture | Runtime target | Date | Run time | Notes |
 |---|---|---|---|---|
-| `web-api` | `node-typescript-stdlib` | 2026-05-07 | 3075s (~51 min) | **First canonical verified-green.** Trust gate (manifest `regen_metadata.fell_back` check) confirmed all 3 IUs (Projects, Tasks, Web Experience) regenerated from real LLM output, no stub substitution. Bootstrap eval `a-task-can-be-created-and-retrieved` passed against the regenerated server. One transient `Command failed: claude -p` mid-bootstrap was absorbed by `generateWithLLM`'s internal retry (MAX_RETRIES=2). Required: the silent-fallback hardening (`4ad334e`) and the 10→20 min timeout bump (`fc182a5`). |
+| `web-api` | `node-typescript-stdlib` | 2026-05-07 | 3075s (~51 min) | **First canonical verified-green.** Trust gate confirmed all 3 IUs (Projects, Tasks, Web Experience) regenerated from real LLM output, no stub substitution. Bootstrap eval `a-task-can-be-created-and-retrieved` passed against the regenerated server. One transient `Command failed: claude -p` mid-bootstrap absorbed by `generateWithLLM`'s internal retry (MAX_RETRIES=2). |
+| `web-api` | `node-typescript` (Hono + better-sqlite3) | 2026-05-07 | 2460s (~41 min) | Trust gate clean. All 3 IUs real LLM output. Eval pass. |
+| `web-api` | `node-typescript-express` | 2026-05-07 | 3728s (~62 min) | Trust gate clean. Bootstrap codegen had a transient `spawnSync claude ETIMEDOUT` on Web Experience but regen (the actual gate after `.phoenix/` deletion) succeeded for all 3 IUs. Eval pass. |
+
+**Coverage summary (2026-05-07):** 3 / 3 runtime targets verified for the `web-api` architecture. Iter 7's "third runtime target proves abstraction" claim is now empirically validated end-to-end through full LLM regeneration, not just hand-curated stubs. The durable/ephemeral split holds across three different framework implementations of the same domain spec.
 
 ### Failed verifications
 

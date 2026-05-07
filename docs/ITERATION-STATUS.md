@@ -4,13 +4,23 @@
 
 ---
 
-## Current state — 2026-05-07 (FIRST CANONICAL VERIFIED-GREEN)
+## Current state — 2026-05-07 (ALL THREE RUNTIME TARGETS VERIFIED)
 
 ### Where we are
 
-**The deletion test passed canonically for `web-api/node-typescript-stdlib` on 2026-05-07** (3075s / 51 min). Trust gate didn't fire (all 3 IUs have real LLM provenance, no stub fallback). Bootstrap eval `a-task-can-be-created-and-retrieved` passed against the regenerated server. This is the first time Phoenix has empirically demonstrated the closed loop end-to-end with full provenance integrity:
+**3 / 3 runtime targets verified for the `web-api` architecture on 2026-05-07.** All passed cleanly: trust gate didn't fire on any run, bootstrap eval `a-task-can-be-created-and-retrieved` passed against each regenerated server.
+
+| Runtime target | Run time | Notes |
+|---|---|---|
+| `node-typescript-stdlib` | 3075s (51 min) | One transient `Command failed: claude -p` absorbed by retry |
+| `node-typescript` (Hono + better-sqlite3) | 2460s (41 min) | Clean run |
+| `node-typescript-express` | 3728s (62 min) | Bootstrap had transient ETIMEDOUT on Web Experience; regen (the actual gate) succeeded for all 3 IUs |
+
+This is the first time Phoenix has empirically demonstrated the closed loop end-to-end with full provenance integrity, across multiple runtime implementations of the same domain spec:
 
 > *Durable spec + evals → LLM-driven canonicalize → IU plan → LLM regen → server → eval pass.*
+
+Iter 7's "third runtime target proves abstraction" claim is now validated under real LLM regeneration, not just hand-curated stubs. The durable/ephemeral split holds across Hono, stdlib, and Express.
 
 Required to land this:
 - Iter 12 (`2f03a82`): the Evaluation primitive
@@ -71,11 +81,11 @@ Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that in
 
 ### Outstanding queued items
 
-1. **Run `node-typescript` (Hono) and `node-typescript-express`** end-to-end now that the closed loop is proven on stdlib. Each target is ~30-60 min plus LLM overhead. Validates that the durable/ephemeral split + Evaluation primitive really do generalize across runtimes (the foundational claim of iter 7's "third runtime target proves abstraction").
+1. **Iter 13 — production observation source + auto-suggested evals + canonicalizer integration of evals as durable inputs alongside clauses** (Flavor B from the iter-12 design discussion). The next big iteration on the strangler-pattern roadmap. Spec: see "Long arc roadmap" in `docs/SUCCESS-CRITERIA.md`. With three runtime targets verified, this is the natural next iteration.
 
-2. **New side-channel-violation warnings.** The 2026-05-07 verified-green run surfaced 5 new bootstrap warnings for undeclared `/tasks` and `/tasks/` external-API side channels. This is real signal — the regenerated Web Experience module is calling sibling APIs and Phoenix's boundary policy is correctly flagging it as undeclared. Either Phoenix's IU plan should auto-derive these declarations from the Web Experience IU's resolved interfaces, or the spec/IU author needs a clean way to declare them. Probably wants iter 13 attention.
+2. **Side-channel-violation warnings observed during stdlib's 2026-05-07 run.** The regenerated Web Experience module is calling sibling APIs (`/tasks`, `/tasks/`) and Phoenix's boundary policy correctly flags them as undeclared. Either Phoenix's IU plan should auto-derive these declarations from resolved interfaces, or the spec/IU author needs a clean way to declare them. Likely iter 13-relevant: layer-2 evals (observed-from-production) become the substrate for auto-derivation.
 
-3. **Iter 13 — production observation source + auto-suggested evals + canonicalizer integration of evals as durable inputs alongside clauses** (Flavor B from the iter-12 design discussion). The next big iteration on the strangler-pattern roadmap. Spec: see "Long arc roadmap" in `docs/SUCCESS-CRITERIA.md`. Particularly relevant: layer-2 evals (observed-from-production) become the substrate for the side-channel auto-derivation.
+3. **Investigate the bootstrap-vs-regen ETIMEDOUT asymmetry observed on `node-typescript-express`.** Bootstrap codegen on Web Experience hit `spawnSync claude ETIMEDOUT` but the same prompt succeeded during regen. Possible causes: bootstrap-time prompt has different context (e.g. siblings not yet in interface registry), or random claude-CLI variance, or the bootstrap pass exhausts a slow code path the regen pass doesn't. Worth tracing if it recurs.
 
 4. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
 
