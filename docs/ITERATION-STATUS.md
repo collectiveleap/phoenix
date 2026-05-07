@@ -4,15 +4,17 @@
 
 ---
 
-## Current state — 2026-05-06 (after iter 12 + verification + silent-fallback hardening)
+## Current state — 2026-05-06 (after iter 12 + silent-fallback hardening + trust-gate validation)
 
 ### Where we are
 
-Iteration 12 is committed. The Evaluation primitive exists in Phoenix for the first time. Twelve iterations on branch `claude/hungry-aryabhata-b78765`.
+Iteration 12 + silent-fallback hardening committed. The Evaluation primitive exists in Phoenix for the first time. Twelve iterations + the hardening on branch `claude/hungry-aryabhata-b78765`.
 
-The 2026-05-06 stdlib run was initially recorded as "verified green" but a follow-up run on `node-typescript` exposed a silent-fallback bug: when `claude` CLI throws (ETIMEDOUT, auth, rate limit) inside `generateWithLLM`, Phoenix substituted stubs and the manifest still recorded `model_id: claude-cli/sonnet` as the provenance. The Web Experience IU on the `node-typescript` run hung for 64 minutes inside `claude`, fell back to a stub (15 lines, `{stub: true}` response), and the manifest lied about it. We discovered this only by visual inspection of generated file sizes.
+**The trust gate works.** A re-run of `node-typescript-stdlib` on 2026-05-06 (1848s / 30.8 min) failed loudly with: *"LLM regen fell back to stubs for: Web Experience (claimed claude-cli/sonnet)."* The manifest now records `regen_metadata.fell_back: true` per IU; the deletion-test trust gate reads it and fails the test with a precise diagnostic before evals even run.
 
-That bug is now patched (silent-fallback hardening — see commit on this branch). The previous stdlib "green" is reclassified as suspect until re-verified with the new instrumentation in place.
+**Yesterday's "verified green" stdlib pass is now retracted.** Same silent-fallback was happening then — we just couldn't see it. The eval suite is sparse (one bootstrap scenario covering CRUD on /projects + /tasks); Web Experience being a stub didn't break that specific eval, so the test passed false-green. Without the trust gate landing, every future "green" would have been suspect. Now we have a working oracle.
+
+**The next blocker is now visible**: `claude` CLI hits its 10-minute `execFileSync` timeout reliably on the Web Experience IU prompt, every run. The silent-fallback hardening makes that visible. The fix is queued (see below).
 
 ### Branch state
 
@@ -47,25 +49,33 @@ a76edee test: functional equivalence between runtime targets via HTTP replay
 
 ### Silent-fallback hardening (this iteration)
 
-Three changes, ~30 lines:
+Three changes:
 
-1. **`RegenMetadata.fell_back?: boolean`** ([src/models/manifest.ts](src/models/manifest.ts)) — set per IU in `generateIU` ([src/regen.ts](src/regen.ts)) when stub substitution replaced LLM output. Absent (not `false`) when LLM succeeded or stubs were chosen up front.
+1. **`RegenMetadata.fell_back?: boolean`** ([src/models/manifest.ts](src/models/manifest.ts)) — set per IU in `generateIU` ([src/regen.ts](src/regen.ts)) when stub substitution replaced LLM output. Absent (not `false`) when LLM succeeded or stubs were chosen up front. Recorded by both `phoenix bootstrap` and `phoenix regen`.
 
-2. **`cmdRegen` and `cmdBootstrap` exit non-zero on full fallback** ([src/cli.ts](src/cli.ts)) — when an LLM provider was configured but every IU's `fell_back` is `true`, exit 1 with a stderr message naming common causes (auth expiry, rate limit, network, ETIMEDOUT). Partial fallback still passes, since one transient IU hiccup shouldn't break the whole run.
+2. **`cmdRegen` exits non-zero on full fallback** ([src/cli.ts](src/cli.ts)) — when an LLM provider was configured but every IU's `fell_back` is `true`, exit 1 with a stderr message naming common causes (auth expiry, rate limit, network, ETIMEDOUT). Partial fallback still passes, since one transient IU hiccup shouldn't break the whole run.
+
+   `cmdBootstrap` was *not* given the same exit-non-zero behavior, deliberately: it runs in many test contexts (see `cli-flow-smoke`) where the test environment may lack `claude` auth and silent stub-completion is the established contract. Bootstrap still records `fell_back` in the manifest, so anyone who cares (the deletion test, manual reviewers) can detect it without bootstrap exiting non-zero.
 
 3. **`onProgress('error', _)` writes to stderr instead of stdout** in both `cmdBootstrap` and `cmdRegen` — so subprocess parents (the deletion test, future supervisors) can capture the failure signal cleanly.
 
-Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that injects a throwing LLMProvider and asserts the manifest carries `fell_back: true`.
+Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that injects a throwing LLMProvider and asserts the manifest carries `fell_back: true`, and a fail-fast trust gate in [tests/e2e/deletion-test.test.ts](tests/e2e/deletion-test.test.ts) that reads the manifest after regen and fails the test (with which-IU diagnostic + preserved tmp dir) if any IU has `fell_back === true`.
 
 ### Outstanding queued items
 
-1. **Re-verify `node-typescript-stdlib`** with the new instrumentation. If `fell_back` is absent on every IU, the green is real. If any IU has `fell_back: true`, the previous "green" was partly stubbed.
+1. **Web Experience IU consistently hits the 10-min `claude` CLI timeout** (`src/llm/claude-cli.ts` line 37: `timeout: 600_000`). Confirmed reproducible across two consecutive `node-typescript-stdlib` runs and the prior `node-typescript` (Hono) run. Until this is solved, the deletion test cannot pass for any target — the trust gate (correctly) refuses to call a partial-stub regen "green".
 
-2. **Run `node-typescript` and `node-typescript-express`** end-to-end. With the hardening in place, full-fallback hangs will exit non-zero rather than silently producing fake-provenance manifests. Each target is ~30-60 min wall-clock plus any LLM hiccup overhead.
+   Next steps to investigate, in order of effort:
+   a. Bump the timeout to ~20 min and see if generation completes — cheap, might be enough on its own. If it does, we know the issue is just "long generation, short timeout."
+   b. Add retry-on-ETIMEDOUT (one retry) in `generateWithLLM` with the bumped timeout.
+   c. If even bumped timeout times out, instrument the `claude -p` invocation: capture stderr, check for partial output, see whether Claude is generating slowly or stuck.
+   d. If Claude is genuinely slow on this prompt: split Web Experience into a smaller IU shape, or simplify its mandatory-imports + template prompt.
+
+2. **Run `node-typescript` and `node-typescript-express`** end-to-end once Web Experience generation is fixed. Each target is ~30-60 min plus any LLM overhead.
 
 3. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
 
-4. **Investigate the 64-min `claude` hang** as a separate concern. Whether it's a Phoenix-side timeout (we should add one to `generateWithLLM`'s spawnSync) or a `claude` CLI bug. A bounded timeout (e.g. 5 min per IU) would catch this much faster.
+4. **`cmdBootstrap` partial-fallback visibility for `cli-flow-smoke`** — bootstrap's stdout is currently used as a contract by tests. If we ever decide we want bootstrap to also fail loudly on full fallback when an LLM was configured, the change is symmetric to the cmdRegen one. Out of scope for now.
 
 ### Long-arc roadmap (codified in docs/SUCCESS-CRITERIA.md)
 

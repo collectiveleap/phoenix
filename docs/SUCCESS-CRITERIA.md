@@ -20,9 +20,15 @@ The deletion test is not aspirational. It is the gate.
 
 ### Verified passes
 
-| Architecture | Runtime target | Date | Run time | Notes |
+*(none yet — see "Failed verifications" below)*
+
+### Failed verifications
+
+| Architecture | Runtime target | Date | Run time | Failure |
 |---|---|---|---|---|
-| `web-api` | `node-typescript-stdlib` | 2026-05-06 | 2547s (~42 min) | **Suspect — needs re-verification after silent-fallback hardening lands.** First green run, but predates `regen_metadata.fell_back` so we cannot tell whether it passed from real LLM output or stub fallback. The 2026-05-06 `node-typescript` run exposed the silent-fallback bug (Web Experience IU stubbed after 64-min `claude` ETIMEDOUT while manifest claimed `claude-cli/sonnet`). Same pattern may have hidden in this run. |
+| `web-api` | `node-typescript-stdlib` | 2026-05-06 (re-run) | 1848s (~31 min) | **Trust gate caught silent fallback on Web Experience IU.** Projects (3644 B) and Tasks (7119 B) regenned with real LLM output. Web Experience hit `spawnSync claude ETIMEDOUT` at the 10-min CLI timeout, regen substituted a stub (437 B), manifest carried `regen_metadata.fell_back: true`, deletion-test trust gate failed loudly with: *"LLM regen fell back to stubs for: Web Experience (claimed claude-cli/sonnet)."* |
+| `web-api` | `node-typescript-stdlib` | 2026-05-06 (initial) | 2547s (~42 min) | Originally recorded as "verified green" — now **retracted**. Predates `regen_metadata.fell_back` so we couldn't see what we now know: the same 10-min Web Experience ETIMEDOUT was happening then too. The "green" came from Projects + Tasks satisfying the bootstrap eval (CRUD on /projects + /tasks); Web Experience being a stub didn't break that specific eval. The eval suite has no /web-experience case yet, so the trust gate was the only thing standing between us and a false-positive. It saved us. |
+| `web-api` | `node-typescript` (Hono) | 2026-05-06 | ~3 hours | Web Experience IU hung in `claude` for 64 minutes (much longer than current 10-min timeout — possibly a prior Phoenix version or CLI version difference) before stub fallback. Test process exited silently with no terminal pass/fail. Forensic check on the preserved temp dir was the only way we knew. **Catalyzed the silent-fallback hardening.** |
 
 ## The Durable / Ephemeral Boundary
 
