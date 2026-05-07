@@ -8,7 +8,7 @@
 
 **Repo**: `/Volumes/My Shared Files/sandbox/phoenix/.claude/worktrees/hungry-aryabhata-b78765`
 **Branch**: `claude/hungry-aryabhata-b78765`
-**Current iteration**: 12 + silent-fallback hardening. Iter-12 stdlib "verified green" (2026-05-06) reclassified as suspect after `node-typescript` run on the same day exposed silent stub-fallback in regen. Hardening shipped same day on this branch.
+**Current iteration**: 12 + silent-fallback hardening + timeout fix. **First canonical verified-green deletion test on 2026-05-07 (3075s) for `web-api/node-typescript-stdlib`** — full closed loop validated, no stub fallback, eval passed. The ground under iters 13-17+ is now empirical, not aspirational.
 
 **On resume, read these in order:**
 1. This file (you're here)
@@ -51,7 +51,7 @@ After the run, check the manifest at `<tmp-dir>/.phoenix/manifests/generated_man
 
 | Iter | Capability |
 |---|---|
-| 12 (DONE + VERIFIED) | Evaluation primitive exists; deletion-test runner; charter + manifesto. Real-LLM green for stdlib target on 2026-05-06. |
+| 12 (DONE + VERIFIED) | Evaluation primitive exists; deletion-test runner; charter + manifesto. **First canonical verified-green for stdlib target on 2026-05-07** (3075s, all IUs real LLM, eval pass). |
 | 13 (NEXT) | Production observation source + auto-suggested evals; canonicalizer integration |
 | 14 | Shadow mode for any current implementation (code or socio-technical) |
 | 15 | Eval coverage metric + progressive cutover |

@@ -20,7 +20,9 @@ The deletion test is not aspirational. It is the gate.
 
 ### Verified passes
 
-*(none yet — see "Failed verifications" below)*
+| Architecture | Runtime target | Date | Run time | Notes |
+|---|---|---|---|---|
+| `web-api` | `node-typescript-stdlib` | 2026-05-07 | 3075s (~51 min) | **First canonical verified-green.** Trust gate (manifest `regen_metadata.fell_back` check) confirmed all 3 IUs (Projects, Tasks, Web Experience) regenerated from real LLM output, no stub substitution. Bootstrap eval `a-task-can-be-created-and-retrieved` passed against the regenerated server. One transient `Command failed: claude -p` mid-bootstrap was absorbed by `generateWithLLM`'s internal retry (MAX_RETRIES=2). Required: the silent-fallback hardening (`4ad334e`) and the 10→20 min timeout bump (`fc182a5`). |
 
 ### Failed verifications
 

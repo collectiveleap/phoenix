@@ -4,17 +4,25 @@
 
 ---
 
-## Current state — 2026-05-06 (after iter 12 + silent-fallback hardening + trust-gate validation)
+## Current state — 2026-05-07 (FIRST CANONICAL VERIFIED-GREEN)
 
 ### Where we are
 
-Iteration 12 + silent-fallback hardening committed. The Evaluation primitive exists in Phoenix for the first time. Twelve iterations + the hardening on branch `claude/hungry-aryabhata-b78765`.
+**The deletion test passed canonically for `web-api/node-typescript-stdlib` on 2026-05-07** (3075s / 51 min). Trust gate didn't fire (all 3 IUs have real LLM provenance, no stub fallback). Bootstrap eval `a-task-can-be-created-and-retrieved` passed against the regenerated server. This is the first time Phoenix has empirically demonstrated the closed loop end-to-end with full provenance integrity:
 
-**The trust gate works.** A re-run of `node-typescript-stdlib` on 2026-05-06 (1848s / 30.8 min) failed loudly with: *"LLM regen fell back to stubs for: Web Experience (claimed claude-cli/sonnet)."* The manifest now records `regen_metadata.fell_back: true` per IU; the deletion-test trust gate reads it and fails the test with a precise diagnostic before evals even run.
+> *Durable spec + evals → LLM-driven canonicalize → IU plan → LLM regen → server → eval pass.*
 
-**Yesterday's "verified green" stdlib pass is now retracted.** Same silent-fallback was happening then — we just couldn't see it. The eval suite is sparse (one bootstrap scenario covering CRUD on /projects + /tasks); Web Experience being a stub didn't break that specific eval, so the test passed false-green. Without the trust gate landing, every future "green" would have been suspect. Now we have a working oracle.
+Required to land this:
+- Iter 12 (`2f03a82`): the Evaluation primitive
+- Iter-12 instrumentation (`380197c`): timeout + diagnostic dump
+- Silent-fallback hardening (`4ad334e`): manifest `regen_metadata.fell_back`, `cmdRegen` exit-non-zero, deletion-test trust gate
+- Trust-gate validation (`071a71a`, `fc182a5`): retraction of yesterday's false-green + 10→20 min `claude` CLI timeout bump after observing Web Experience genuinely needs more time
 
-**The next blocker is now visible**: `claude` CLI hits its 10-minute `execFileSync` timeout reliably on the Web Experience IU prompt, every run. The silent-fallback hardening makes that visible. The fix is queued (see below).
+The silent-fallback hardening was foundational. Yesterday's apparent green (now retracted) was actually 2-of-3 IUs real with Web Experience stubbed — but the eval coverage didn't probe Web Experience, so the test passed false-green. The trust gate caught this on the first re-run, surfaced the underlying timeout-too-short signal, and after that single fix, the next run was canonically green.
+
+### What this proves
+
+Phoenix's headline thesis ("durable spec + evals → working code, regenerable") is no longer aspirational. It's empirically verified for one architecture/runtime pair with one bootstrap eval. The roadmap from here (iters 13-17+) extends the eval surface and adds the strangler primitives, all built on this proven foundation.
 
 ### Branch state
 
@@ -63,18 +71,15 @@ Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that in
 
 ### Outstanding queued items
 
-1. **`claude` CLI timeout bumped 10 min → 20 min** (`src/llm/claude-cli.ts:37`). Production observation from the 2026-05-06 deletion-test re-run: Web Experience IU hit the 10-min ceiling reliably while genuinely producing output (not hung). 20 min gives that IU room. Pending: re-run deletion test to validate.
+1. **Run `node-typescript` (Hono) and `node-typescript-express`** end-to-end now that the closed loop is proven on stdlib. Each target is ~30-60 min plus LLM overhead. Validates that the durable/ephemeral split + Evaluation primitive really do generalize across runtimes (the foundational claim of iter 7's "third runtime target proves abstraction").
 
-   If 20 min is still not enough, escalation order:
-   a. Add retry-on-ETIMEDOUT (one retry) in `generateWithLLM`.
-   b. Instrument `claude -p` to capture stderr + check for partial output, distinguishing slow-generation from stuck.
-   c. Reshape Web Experience: split into a smaller IU shape, or simplify the mandatory-imports + template prompt.
+2. **New side-channel-violation warnings.** The 2026-05-07 verified-green run surfaced 5 new bootstrap warnings for undeclared `/tasks` and `/tasks/` external-API side channels. This is real signal — the regenerated Web Experience module is calling sibling APIs and Phoenix's boundary policy is correctly flagging it as undeclared. Either Phoenix's IU plan should auto-derive these declarations from the Web Experience IU's resolved interfaces, or the spec/IU author needs a clean way to declare them. Probably wants iter 13 attention.
 
-2. **Run `node-typescript` and `node-typescript-express`** end-to-end once Web Experience generation is fixed. Each target is ~30-60 min plus any LLM overhead.
+3. **Iter 13 — production observation source + auto-suggested evals + canonicalizer integration of evals as durable inputs alongside clauses** (Flavor B from the iter-12 design discussion). The next big iteration on the strangler-pattern roadmap. Spec: see "Long arc roadmap" in `docs/SUCCESS-CRITERIA.md`. Particularly relevant: layer-2 evals (observed-from-production) become the substrate for the side-channel auto-derivation.
 
-3. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
+4. **Pin the version-stable Claude CLI symlink** in docs/sanderson.md or SUCCESS-CRITERIA.md as the canonical CLI setup. Note the version pinning in `/Users/san/Library/Application Support/Claude/claude-code/X.Y.Z/...` and that auto-update breaks the symlink.
 
-4. **`cmdBootstrap` partial-fallback visibility for `cli-flow-smoke`** — bootstrap's stdout is currently used as a contract by tests. If we ever decide we want bootstrap to also fail loudly on full fallback when an LLM was configured, the change is symmetric to the cmdRegen one. Out of scope for now.
+5. **`cmdBootstrap` partial-fallback visibility for `cli-flow-smoke`** — bootstrap's stdout is currently used as a contract by tests. If we ever decide we want bootstrap to also fail loudly on full fallback when an LLM was configured, the change is symmetric to the cmdRegen one. Out of scope for now.
 
 ### Long-arc roadmap (codified in docs/SUCCESS-CRITERIA.md)
 
