@@ -29,12 +29,18 @@ export class ClaudeCliProvider implements LLMProvider {
       args.push('--system-prompt', options.system);
     }
 
-    // Pass prompt via stdin to avoid argument length limits
+    // Pass prompt via stdin to avoid argument length limits.
+    //
+    // 20-min timeout: production observation from the 2026-05-06
+    // deletion-test re-run showed Web Experience IU hits the previous
+    // 10-min timeout reliably while genuinely producing output (not
+    // hung). Bumping to 20 min gives that IU room; if anything still
+    // takes >20 min it's almost certainly stuck and should fail.
     const result = execFileSync('claude', args, {
       encoding: 'utf8',
       input: prompt,
       maxBuffer: 10 * 1024 * 1024, // 10MB
-      timeout: 600_000, // 10 minutes for large generations
+      timeout: 1_200_000, // 20 minutes
     });
 
     if (!result || result.trim().length === 0) {

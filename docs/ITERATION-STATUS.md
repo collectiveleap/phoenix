@@ -63,13 +63,12 @@ Plus a unit test in [tests/unit/regen.test.ts](tests/unit/regen.test.ts) that in
 
 ### Outstanding queued items
 
-1. **Web Experience IU consistently hits the 10-min `claude` CLI timeout** (`src/llm/claude-cli.ts` line 37: `timeout: 600_000`). Confirmed reproducible across two consecutive `node-typescript-stdlib` runs and the prior `node-typescript` (Hono) run. Until this is solved, the deletion test cannot pass for any target — the trust gate (correctly) refuses to call a partial-stub regen "green".
+1. **`claude` CLI timeout bumped 10 min → 20 min** (`src/llm/claude-cli.ts:37`). Production observation from the 2026-05-06 deletion-test re-run: Web Experience IU hit the 10-min ceiling reliably while genuinely producing output (not hung). 20 min gives that IU room. Pending: re-run deletion test to validate.
 
-   Next steps to investigate, in order of effort:
-   a. Bump the timeout to ~20 min and see if generation completes — cheap, might be enough on its own. If it does, we know the issue is just "long generation, short timeout."
-   b. Add retry-on-ETIMEDOUT (one retry) in `generateWithLLM` with the bumped timeout.
-   c. If even bumped timeout times out, instrument the `claude -p` invocation: capture stderr, check for partial output, see whether Claude is generating slowly or stuck.
-   d. If Claude is genuinely slow on this prompt: split Web Experience into a smaller IU shape, or simplify its mandatory-imports + template prompt.
+   If 20 min is still not enough, escalation order:
+   a. Add retry-on-ETIMEDOUT (one retry) in `generateWithLLM`.
+   b. Instrument `claude -p` to capture stderr + check for partial output, distinguishing slow-generation from stuck.
+   c. Reshape Web Experience: split into a smaller IU shape, or simplify the mandatory-imports + template prompt.
 
 2. **Run `node-typescript` and `node-typescript-express`** end-to-end once Web Experience generation is fixed. Each target is ~30-60 min plus any LLM overhead.
 

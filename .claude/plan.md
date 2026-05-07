@@ -41,7 +41,7 @@ After the run, check the manifest at `<tmp-dir>/.phoenix/manifests/generated_man
 
 1. **Run `node-typescript` and `node-typescript-express`** end-to-end. With hardening, full-fallback hangs exit non-zero rather than silently producing fake-provenance manifests.
 
-2. **Bound the per-IU LLM call timeout.** A 64-min hang on a single `spawnSync claude` is unreasonable. Add a Phoenix-side timeout (e.g. 5 min) in `generateWithLLM`. Different concern from silent-fallback — the hardening makes failures visible; this would prevent the hang from happening at all.
+2. ~~**Bound the per-IU LLM call timeout.**~~ DONE — but in the *opposite* direction the original plan assumed. The 2026-05-06 trust-gate-validated re-run revealed Web Experience IU is genuinely slow (>10 min of legitimate generation), not stuck. Bumped from 10 min to 20 min in `src/llm/claude-cli.ts:37`. Pending: re-run deletion test to confirm 20 min is enough.
 
 3. **Iter 13 — production observation source + auto-suggested evals + canonicalizer integration of evals as durable inputs alongside clauses** (Flavor B from the iter-12 design discussion). The next big iteration on the strangler-pattern roadmap. Spec: see "Long arc roadmap" in `docs/SUCCESS-CRITERIA.md`.
 
