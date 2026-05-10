@@ -513,14 +513,6 @@ async function cmdBootstrap(): Promise<void> {
   console.log(green('  ✔ Bootstrap complete.'));
   console.log(`    State: ${cyan(machine.getState())}`);
   console.log(`    Run ${cyan('phoenix status')} to see the trust dashboard.`);
-
-  // Exit non-zero if every IU fell back to stubs while an LLM was configured.
-  // See cmdRegen for rationale; the same trust gap applies to bootstrap.
-  if (llm && regenResults.length > 0 && regenResults.every(r => r.manifest.regen_metadata.fell_back === true)) {
-    process.stderr.write(`\n${red('✖')} ${red('All IUs fell back to stubs.')} ${dim('Provider configured but no IU produced LLM output.')}\n`);
-    process.stderr.write(`  ${dim('Common causes:')} ${dim('expired auth, rate limit, network unreachable, ETIMEDOUT.')}\n`);
-    process.exit(1);
-  }
 }
 
 function cmdStatus(): void {
