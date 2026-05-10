@@ -6,6 +6,8 @@ import { z } from 'zod';
 
 // ─── Database migrations ────────────────────────────────────────────────────
 
+// ─── Database migrations ────────────────────────────────────────────────────
+
 const router = new Hono();
 
 registerMigration('tasks', `
@@ -21,98 +23,88 @@ registerMigration('tasks', `
   )
 `);
 
+const PRIORITIES = ['urgent', 'high', 'normal', 'low'] as const;
+
+const isValidDate = (s: string) => !isNaN(Date.parse(s));
+
 const CreateTaskSchema = z.object({
-  title: z.string().min(1, 'Title cannot be empty').max(500, 'Title cannot exceed 500 characters'),
-  description: z.string().max(5000, 'Description cannot exceed 5000 characters').optional().default(''),
-  priority: z.enum(['urgent', 'high', 'normal', 'low']).optional().default('normal'),
-  due_date: z.string().datetime().nullable().optional(),
+  title: z.string().min(1, 'Title is required').max(500, 'Title must not exceed 500 characters'),
+  description: z.string().max(5000, 'Description must not exceed 5000 characters').optional().default(''),
+  priority: z.enum(PRIORITIES).default('normal'),
+  due_date: z.string().nullable().optional().refine(v => v == null || isValidDate(v), { message: 'Invalid date' }),
   project_id: z.number().int().nullable().optional(),
+  completed: z.boolean().optional().default(false),
 });
 
 const UpdateTaskSchema = z.object({
-  title: z.string().min(1, 'Title cannot be empty').max(500, 'Title cannot exceed 500 characters').optional(),
-  description: z.string().max(5000, 'Description cannot exceed 5000 characters').optional(),
-  priority: z.enum(['urgent', 'high', 'normal', 'low']).optional(),
-  due_date: z.string().datetime().nullable().optional(),
-  completed: z.boolean().optional(),
+  title: z.string().min(1, 'Title is required').max(500, 'Title must not exceed 500 characters').optional(),
+  description: z.string().max(5000, 'Description must not exceed 5000 characters').optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  due_date: z.string().nullable().optional().refine(v => v == null || isValidDate(v), { message: 'Invalid date' }),
   project_id: z.number().int().nullable().optional(),
-});
-
-router.get('/', (c) => {
-  let sql = 'SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id';
-  const conditions: string[] = [];
-  const params: any[] = [];
-  
-  const status = c.req.query('status');
-  if (status === 'active') { conditions.push('tasks.completed = 0'); }
-  else if (status === 'completed') { conditions.push('tasks.completed = 1'); }
-  
-  const projectId = c.req.query('project_id');
-  if (projectId !== undefined) { 
-    if (projectId === 'null') {
-      conditions.push('tasks.project_id IS NULL');
-    } else {
-      conditions.push('tasks.project_id = ?'); 
-      params.push(Number(projectId)); 
-    }
-  }
-  
-  const priority = c.req.query('priority');
-  if (priority !== undefined) { conditions.push('tasks.priority = ?'); params.push(priority); }
-  
-  if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
-  sql += " ORDER BY CASE tasks.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 END, CASE WHEN tasks.due_date IS NOT NULL AND tasks.due_date < datetime('now') THEN 0 ELSE 1 END, tasks.created_at DESC";
-  
-  return c.json(db.prepare(sql).all(...params));
+  completed: z.boolean().optional(),
 });
 
 router.get('/stats', (c) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const total = (db.prepare('SELECT COUNT(*) as count FROM tasks').get() as any).count as number;
+  const completed = (db.prepare('SELECT COUNT(*) as count FROM tasks WHERE completed = 1').get() as any).count as number;
+  const overdue = (db.prepare(
+    "SELECT COUNT(*) as count FROM tasks WHERE completed = 0 AND due_date IS NOT NULL AND due_date < ?"
+  ).get(today) as any).count as number;
+  const completion_percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+  return c.json({ total, completed, overdue, completion_percentage });
+});
+
+router.get('/', (c) => {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  const status = c.req.query('status');
+  if (status === 'active') { conditions.push('tasks.completed = 0'); }
+  else if (status === 'completed') { conditions.push('tasks.completed = 1'); }
+
   const projectId = c.req.query('project_id');
-  let whereClause = '';
-  const params: any[] = [];
-  
-  if (projectId !== undefined) {
-    if (projectId === 'null') {
-      whereClause = ' WHERE project_id IS NULL';
-    } else {
-      whereClause = ' WHERE project_id = ?';
-      params.push(Number(projectId));
-    }
-  }
-  
-  const totalTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks${whereClause}`).get(...params) as { count: number };
-  const completedTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completed = 1`).get(...params) as { count: number };
-  const overdueTasks = db.prepare(`SELECT COUNT(*) as count FROM tasks${whereClause}${whereClause ? ' AND' : ' WHERE'} completed = 0 AND due_date IS NOT NULL AND due_date < datetime('now')`).get(...params) as { count: number };
-  
-  const completionPercentage = totalTasks.count > 0 ? Math.round((completedTasks.count / totalTasks.count) * 100) : 0;
-  
-  return c.json({
-    total_tasks: totalTasks.count,
-    completed_tasks: completedTasks.count,
-    overdue_tasks: overdueTasks.count,
-    completion_percentage: completionPercentage
-  });
+  if (projectId !== undefined) { conditions.push('tasks.project_id = ?'); params.push(Number(projectId)); }
+
+  const priority = c.req.query('priority');
+  if (priority !== undefined) { conditions.push('tasks.priority = ?'); params.push(priority); }
+
+  let sql = 'SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id';
+  if (conditions.length > 0) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += `
+    ORDER BY
+      CASE WHEN tasks.completed = 0 AND tasks.due_date IS NOT NULL AND tasks.due_date < date('now') THEN 0 ELSE 1 END ASC,
+      CASE tasks.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 WHEN 'low' THEN 4 END ASC,
+      tasks.created_at ASC`;
+
+  const rows = db.prepare(sql).all(...params) as any[];
+  return c.json(rows.map(r => ({ ...r, completed: r.completed === 1 })));
 });
 
 router.get('/:id', (c) => {
-  const task = db.prepare('SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?').get(c.req.param('id'));
-  if (!task) return c.json({ error: 'Not found' }, 404);
-  return c.json(task);
+  const row = db.prepare(
+    'SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?'
+  ).get(c.req.param('id')) as any;
+  if (!row) return c.json({ error: 'Not found' }, 404);
+  return c.json({ ...row, completed: row.completed === 1 });
 });
 
 router.post('/', async (c) => {
   let body; try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON' }, 400); }
   const result = CreateTaskSchema.safeParse(body);
   if (!result.success) return c.json({ error: result.error.issues[0].message }, 400);
-  const { title, description, priority, due_date, project_id } = result.data;
-  
+  const { title, description, priority, due_date, project_id, completed } = result.data;
   if (project_id != null) {
     if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(project_id)) return c.json({ error: 'Project not found' }, 400);
   }
-  
-  const info = db.prepare('INSERT INTO tasks (title, description, priority, due_date, project_id) VALUES (?, ?, ?, ?, ?)').run(title, description, priority, due_date ?? null, project_id ?? null);
-  const task = db.prepare('SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?').get(info.lastInsertRowid);
-  return c.json(task, 201);
+  const info = db.prepare(
+    'INSERT INTO tasks (title, description, priority, due_date, project_id, completed) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(title, description, priority, due_date ?? null, project_id ?? null, completed ? 1 : 0);
+  const row = db.prepare(
+    'SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?'
+  ).get(info.lastInsertRowid) as any;
+  return c.json({ ...row, completed: row.completed === 1 }, 201);
 });
 
 router.patch('/:id', async (c) => {
@@ -122,19 +114,19 @@ router.patch('/:id', async (c) => {
   const result = UpdateTaskSchema.safeParse(body);
   if (!result.success) return c.json({ error: result.error.issues[0].message }, 400);
   const u = result.data;
-  
-  if (u.project_id !== undefined && u.project_id != null) {
+  if (u.project_id != null) {
     if (!db.prepare('SELECT id FROM projects WHERE id = ?').get(u.project_id)) return c.json({ error: 'Project not found' }, 400);
   }
-  
   if (u.title !== undefined) db.prepare('UPDATE tasks SET title = ? WHERE id = ?').run(u.title, id);
   if (u.description !== undefined) db.prepare('UPDATE tasks SET description = ? WHERE id = ?').run(u.description, id);
   if (u.priority !== undefined) db.prepare('UPDATE tasks SET priority = ? WHERE id = ?').run(u.priority, id);
-  if (u.due_date !== undefined) db.prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(u.due_date, id);
+  if ('due_date' in u) db.prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(u.due_date ?? null, id);
+  if ('project_id' in u) db.prepare('UPDATE tasks SET project_id = ? WHERE id = ?').run(u.project_id ?? null, id);
   if (u.completed !== undefined) db.prepare('UPDATE tasks SET completed = ? WHERE id = ?').run(u.completed ? 1 : 0, id);
-  if (u.project_id !== undefined) db.prepare('UPDATE tasks SET project_id = ? WHERE id = ?').run(u.project_id, id);
-  
-  return c.json(db.prepare('SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?').get(id));
+  const row = db.prepare(
+    'SELECT tasks.*, projects.name as project_name FROM tasks LEFT JOIN projects ON tasks.project_id = projects.id WHERE tasks.id = ?'
+  ).get(id) as any;
+  return c.json({ ...row, completed: row.completed === 1 });
 });
 
 router.delete('/:id', (c) => {
@@ -146,6 +138,7 @@ router.delete('/:id', (c) => {
 
 /** @internal Phoenix VCS traceability — do not remove. */
 
+
 /** @internal Phoenix VCS traceability — do not remove. */
 
 
@@ -153,7 +146,7 @@ export default router;
 
 /** @internal Phoenix VCS traceability — do not remove. */
 export const _phoenix = {
-  iu_id: '072739a383fa6c6f8d7008711666d102390ba973448eee3c643cf0208ae4509b',
+  iu_id: 'b9750869e2d99d4ece62e819b457ae999fea151a5e8e78543e89e212832e06ec',
   name: 'Tasks',
   risk_tier: 'high',
   canon_ids: [14 as const],
