@@ -10,6 +10,13 @@
  * stalled call can be killed via an AbortSignal (O8) rather than a
  * pipe-holding background timer.
  *
+ * The CLI is invoked with `--output-format stream-json --verbose` and its JSONL
+ * event stream is parsed for assistant text. Default text mode buffers the whole
+ * response until completion — emitting zero bytes for minutes on a large module,
+ * which the watchdog (O2/O8) misreads as a startup stall and kills mid-generation
+ * (S1/S2). Streaming makes first-byte fire in ~2s and `bytesStreamed` rise
+ * throughout, so a live call is classified healthy for as long as it produces.
+ *
  * Locating + invoking the CLI is Phoenix's job, not the user's (B4): the binary
  * is resolved robustly (override → PATH → known install locations) and invoked
  * with startup-minimizing flags + non-essential-traffic disabled, so the user
@@ -146,6 +153,68 @@ export function resetClaudePathCache(): void {
   cachedPath = null;
 }
 
+/** A single decoded signal from one `stream-json` output line. */
+export interface StreamJsonChunk {
+  /** Incremental assistant text to append (from assistant / delta events). */
+  text?: string;
+  /** Authoritative final text (from the terminal `result` event). */
+  result?: string;
+  /** True when the terminal `result` event reports an error. */
+  isError?: boolean;
+}
+
+interface RawStreamEvent {
+  type?: string;
+  subtype?: string;
+  is_error?: boolean;
+  result?: unknown;
+  message?: { content?: Array<{ type?: string; text?: unknown }> };
+  delta?: { type?: string; text?: unknown };
+  event?: { delta?: { type?: string; text?: unknown } };
+}
+
+/**
+ * Parse one line of `claude --output-format stream-json` output into the text /
+ * result / error signal it carries. Envelope events (system/init, tool events)
+ * and blank or non-JSON lines yield `{}`, so the caller can still treat every
+ * line as a liveness heartbeat regardless of shape.
+ */
+export function parseStreamJsonLine(line: string): StreamJsonChunk {
+  const trimmed = line.trim();
+  if (!trimmed) return {};
+  let ev: RawStreamEvent;
+  try {
+    ev = JSON.parse(trimmed) as RawStreamEvent;
+  } catch {
+    return {};
+  }
+  if (!ev || typeof ev !== 'object') return {};
+
+  // Terminal result event — the authoritative, complete final text.
+  if (ev.type === 'result') {
+    const isError = ev.is_error === true || (typeof ev.subtype === 'string' && ev.subtype !== 'success');
+    const result = typeof ev.result === 'string' ? ev.result : undefined;
+    return { result, isError };
+  }
+
+  // Assistant message — complete text content blocks (default granularity).
+  if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
+    const text = ev.message.content
+      .filter((b): b is { type?: string; text: string } => !!b && b.type === 'text' && typeof b.text === 'string')
+      .map(b => b.text)
+      .join('');
+    return text ? { text } : {};
+  }
+
+  // Partial streaming text deltas, if the CLI emits them.
+  const delta = ev.delta ?? ev.event?.delta;
+  if (delta && delta.type === 'text_delta' && typeof delta.text === 'string') {
+    return { text: delta.text };
+  }
+
+  return {};
+}
+
 export class ClaudeCliProvider implements LLMProvider {
   readonly name = 'claude-cli';
   readonly model: string;
@@ -171,6 +240,11 @@ export class ClaudeCliProvider implements LLMProvider {
       '--model', this.model,
       '--tools', '',
       '--no-session-persistence',
+      // stream-json (requires --verbose in -p mode) emits output as it is
+      // produced. Default text mode buffers until completion → 0 bytes for
+      // minutes on a large module → watchdog false-positive startup-stall (S1).
+      '--output-format', 'stream-json',
+      '--verbose',
       ...STARTUP_FLAGS,
     ];
     if (options?.system) {
@@ -188,11 +262,23 @@ export class ClaudeCliProvider implements LLMProvider {
         env: { ...process.env, ...STARTUP_ENV },
       });
 
-      let out = '';
       let stderr = '';
       let bytes = 0;
       let firstByteSeen = false;
       let settled = false;
+      // stream-json accumulators: a line buffer across chunks, incremental
+      // assistant text, the authoritative final `result`, and any reported error.
+      let buffer = '';
+      let streamedText = '';
+      let finalResult: string | null = null;
+      let resultError: string | null = null;
+      const consumeLine = (line: string): string => {
+        const c = parseStreamJsonLine(line);
+        if (c.result !== undefined) finalResult = c.result;
+        if (c.isError) resultError = c.result ?? 'Claude CLI stream reported an error';
+        if (c.text) { streamedText += c.text; return c.text; }
+        return '';
+      };
 
       const killTree = () => {
         try {
@@ -221,26 +307,45 @@ export class ClaudeCliProvider implements LLMProvider {
           firstByteSeen = true;
           hooks?.onFirstByte?.();
         }
-        const text = chunk.toString('utf8');
-        out += text;
         bytes += chunk.length;
-        hooks?.onChunk?.(bytes, text);
+        buffer += chunk.toString('utf8');
+        let delta = '';
+        let idx: number;
+        while ((idx = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 1);
+          delta += consumeLine(line);
+        }
+        // Heartbeat on every chunk — even envelope-only events that carry no
+        // text — so bytesStreamed rises and the watchdog never kills a live
+        // call for as long as it produces (S2).
+        hooks?.onChunk?.(bytes, delta);
       });
-      child.stdout.on('end', () => hooks?.onStreamEnd?.());
+      child.stdout.on('end', () => {
+        if (buffer.trim().length > 0) { consumeLine(buffer); buffer = ''; }
+        hooks?.onStreamEnd?.();
+      });
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
 
       child.on('close', (code, signal) => {
         if (settled) return;
         settled = true;
         options?.signal?.removeEventListener('abort', onAbort);
+        if (buffer.trim().length > 0) { consumeLine(buffer); buffer = ''; }
         if (signal) {
           reject(new Error(`Claude CLI killed by ${signal}`));
+          return;
+        }
+        if (resultError) {
+          reject(new Error(`Claude CLI error: ${resultError.trim().slice(0, 500)}`));
           return;
         }
         if (code !== 0) {
           reject(new Error(`Claude CLI exited ${code}: ${stderr.trim().slice(0, 500)}`));
           return;
         }
+        // Prefer the terminal result event's text; fall back to streamed deltas.
+        const out = finalResult ?? streamedText;
         if (!out || out.trim().length === 0) {
           reject(new Error('Claude CLI returned empty response'));
           return;

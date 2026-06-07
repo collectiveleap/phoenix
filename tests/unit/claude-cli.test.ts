@@ -7,6 +7,8 @@ import {
   resetClaudePathCache,
   desktopCliCandidates,
   compareVersions,
+  parseStreamJsonLine,
+  ClaudeCliProvider,
   STARTUP_FLAGS,
   STARTUP_ENV,
 } from '../../src/llm/claude-cli.js';
@@ -110,5 +112,103 @@ describe('Claude CLI location + invocation (B4)', () => {
 
     rmSync(stub, { force: true });
     expect(resolveClaudePath()).toBeNull();
+  });
+});
+
+describe('stream-json line parsing (S1: extract text, not JSON)', () => {
+  it('extracts text from an assistant content block', () => {
+    const line = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'hello' }] } });
+    expect(parseStreamJsonLine(line)).toEqual({ text: 'hello' });
+  });
+
+  it('joins multiple text blocks in one assistant message', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] },
+    });
+    expect(parseStreamJsonLine(line)).toEqual({ text: 'ab' });
+  });
+
+  it('extracts a partial text_delta when the CLI streams deltas', () => {
+    const line = JSON.stringify({ type: 'stream_event', delta: { type: 'text_delta', text: 'xyz' } });
+    expect(parseStreamJsonLine(line)).toEqual({ text: 'xyz' });
+  });
+
+  it('takes the authoritative final text from a success result event', () => {
+    const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'final' });
+    expect(parseStreamJsonLine(line)).toEqual({ result: 'final', isError: false });
+  });
+
+  it('flags an error result event', () => {
+    const line = JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true });
+    const chunk = parseStreamJsonLine(line);
+    expect(chunk.isError).toBe(true);
+  });
+
+  it('treats envelope, blank, and non-JSON lines as heartbeat-only (no text)', () => {
+    expect(parseStreamJsonLine(JSON.stringify({ type: 'system', subtype: 'init' }))).toEqual({});
+    expect(parseStreamJsonLine('')).toEqual({});
+    expect(parseStreamJsonLine('  ')).toEqual({});
+    expect(parseStreamJsonLine('not json {')).toEqual({});
+  });
+});
+
+describe('Claude CLI streaming (S1/S2: incremental output, not a single end-jump)', () => {
+  let dir: string;
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'phoenix-stream-')); resetClaudePathCache(); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); resetClaudePathCache(); });
+
+  /**
+   * Write a fake `claude` that answers `--version` and, for a `-p` call, emits
+   * scripted stream-json lines with gaps — so Node sees them as separate stdout
+   * chunks, exactly like a real streaming generation.
+   */
+  function writeStreamingCli(lines: string[], opts: { gap?: number } = {}): string {
+    const gap = opts.gap ?? 0.05;
+    const emits = lines.map(l => `printf '%s\\n' '${l.replace(/'/g, "'\\''")}'\nsleep ${gap}`).join('\n');
+    const p = join(dir, 'claude');
+    writeFileSync(p, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "fake 1.0.0"; exit 0; fi\ncat > /dev/null\n${emits}\n`);
+    chmodSync(p, 0o755);
+    return p;
+  }
+
+  it('fires incremental progress with monotonically rising bytes and returns parsed text', async () => {
+    const bin = writeStreamingCli([
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'export const a' }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: ' = 1;' }] } }),
+      JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'export const a = 1;' }),
+    ]);
+
+    const provider = new ClaudeCliProvider('sonnet', bin);
+    let firstByteAt = -1;
+    const progress: number[] = [];
+    let calls = 0;
+    const text = await provider.generateStream('make a module', undefined, {
+      onFirstByte: () => { firstByteAt = ++calls; },
+      onChunk: (total) => { calls++; progress.push(total); },
+    });
+
+    // Resolved value is the parsed code, never the JSON envelope.
+    expect(text).toBe('export const a = 1;');
+    expect(text).not.toContain('"type"');
+
+    // First byte arrived before any later activity (early TTFB, not at the end).
+    expect(firstByteAt).toBe(1);
+
+    // bytesStreamed rose across ≥2 progress events — not a single jump at the end.
+    expect(progress.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < progress.length; i++) expect(progress[i]).toBeGreaterThanOrEqual(progress[i - 1]);
+    expect(progress[progress.length - 1]).toBeGreaterThan(progress[0]);
+  });
+
+  it('rejects when the stream reports an error result', async () => {
+    const bin = writeStreamingCli([
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'boom' }),
+    ]);
+    const provider = new ClaudeCliProvider('sonnet', bin);
+    await expect(provider.generateStream('p')).rejects.toThrow(/Claude CLI error: boom/);
   });
 });

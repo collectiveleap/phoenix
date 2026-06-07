@@ -109,4 +109,29 @@ describe('Watchdog (O2/O8: stalls detected and killed without a human)', () => {
     const kill = RunJournal.readEvents(phoenixRoot, j.runId).find(e => e.type === 'watchdog_kill');
     expect(kill?.health).toBe('stream-stalled');
   });
+
+  it('never kills a call that keeps streaming past the startup budget (S2)', async () => {
+    const j = new RunJournal(phoenixRoot);
+    j.startRun();
+    // First byte early, then steady chunks whose total duration far exceeds the
+    // startup budget — the large-output case the diagnosis describes. Each gap
+    // stays inside streamStallMs, so the call is healthy the whole time.
+    const chunks = Array.from({ length: 8 }, () => ({ delayMs: 20, text: 'x' }));
+    const text = await supervisedGenerate(j, provider2(chunks), 'p', undefined, ctx, {
+      budgets: { startupMs: 30, streamStallMs: 60, wedgeMs: 60 },
+      pollMs: 10,
+    });
+
+    expect(text).toBe('xxxxxxxx');
+    const rec = j.callList()[0];
+    expect(rec.outcome).toBe('ok');
+    // The defect this guards against: a watchdog_kill against a live, producing call.
+    const kill = RunJournal.readEvents(phoenixRoot, j.runId).find(e => e.type === 'watchdog_kill');
+    expect(kill).toBeUndefined();
+  });
 });
+
+/** A steadily-streaming provider: first byte at 10ms, then the given chunks. */
+function provider2(chunks: { delayMs: number; text: string }[]): ScriptedProvider {
+  return new ScriptedProvider({ ttfbMs: 10, chunks, tailMs: 20 });
+}
