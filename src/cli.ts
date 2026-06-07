@@ -1068,6 +1068,22 @@ function cmdPlan(): void {
     console.log(`  ${yellow(`⚠ ${report.oversizedCount} module(s) exceed ${report.sizeThreshold} source nodes — generation risk. Consider splitting the spec section.`)}`);
     console.log();
   }
+
+  // Spec-shape feedback (F2/F4): flag heading-structure anti-patterns that will
+  // generate poorly, each with the concrete fix, before any code is generated.
+  if (report.warnings.length > 0) {
+    console.log(`  ${bold(yellow(`⚠ Spec-shape warnings (${report.warnings.length})`))}`);
+    for (const w of report.warnings) {
+      console.log(`    ${yellow('•')} ${w.message}`);
+      console.log(`      ${dim('→ fix:')} ${w.remediation}`);
+    }
+    console.log();
+    console.log(`  ${dim('See docs/SPEC-SHAPE.md for the heading → module rule.')}`);
+    console.log();
+  } else {
+    console.log(`  ${green(`✓ Spec shape looks good — ${ius.length} module(s).`)}`);
+    console.log();
+  }
 }
 
 async function cmdRegen(args: string[]): Promise<void> {

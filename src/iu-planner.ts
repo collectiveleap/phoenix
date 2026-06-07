@@ -164,7 +164,35 @@ export interface PlanReport {
   headingToModule: { heading: string; module: string }[];
   sizeThreshold: number;
   oversizedCount: number;
+  /** Spec-shape anti-patterns surfaced at plan time, each with a fix (F2/F4). */
+  warnings: SpecShapeWarning[];
 }
+
+/**
+ * A spec-shape anti-pattern detected at plan time (F2), paired with the
+ * concrete remediation the author should apply (F4). Feedback only — Phoenix
+ * advises; it never rewrites the spec.
+ */
+export interface SpecShapeWarning {
+  kind: 'fragmented-ui' | 'normative-intro' | 'empty-section';
+  /** What will generate poorly. */
+  message: string;
+  /** The concrete fix to apply to the spec. */
+  remediation: string;
+  /** Source section heading(s) this warning is about. */
+  headings: string[];
+  /** Module(s) the offending content lands in, when applicable. */
+  module?: string;
+}
+
+/**
+ * UI vocabulary scanned against section *body* text (not headings) to decide
+ * whether sibling `##` sections describe one cohesive UI. Body-level scanning
+ * is what catches UI sections whose names ("Loading", "Editing", "Styling")
+ * don't themselves signal a UI. Tunable.
+ */
+const UI_LEXICON =
+  /\b(render(?:s|ed|ing)?|DOM|CSS|stylesheet|styl(?:e|es|ed|ing)|button|HTML|browser|click(?:s|ed|ing)?|contenteditable|keystroke|keypress|viewport|layout|frontend|front-end|single-page|web ?page|web app|caret|cursor|scroll|hover)\b/i;
 
 export interface PlanReportOptions {
   /** Node-count threshold for the oversize flag. */
@@ -234,7 +262,148 @@ export function analyzePlan(
     headingToModule: headingToModule.sort((a, b) => a.heading.localeCompare(b.heading)),
     sizeThreshold: threshold,
     oversizedCount: modules.filter(m => m.oversized).length,
+    warnings: detectSpecShapeWarnings(ius, canonNodes, clauses),
   };
+}
+
+// ─── Spec-shape feedback (F2/F4) ─────────────────────────────────────────────
+
+/** Per (doc, top-level `##` section) aggregate used by the shape detectors. */
+interface SectionShape {
+  docId: string;
+  /** Top-level section name (`section_path[1]`, or `section_path[0]`). */
+  section: string;
+  /** Content sat before any heading. */
+  isPreamble: boolean;
+  /** Content sat directly under the document H1 (no `##` wrapper). */
+  isBareH1: boolean;
+  /** Concatenated raw body text — scanned for UI vocabulary. */
+  body: string;
+  /** Count of non-CONTEXT canonical nodes this section produced. */
+  nonContextNodes: number;
+  /** Module names this section's nodes landed in. */
+  modules: Set<string>;
+}
+
+/**
+ * Detect spec-shape anti-patterns at plan time (F2) and pair each with a
+ * concrete remediation (F4). Pure — reads the same provenance chain
+ * (IU → canon → clause → section) that `analyzePlan` uses. Detects:
+ *  - fragmented-ui:   a cohesive UI split across `##` sections → many modules.
+ *  - normative-intro: an intro/preamble carrying requirements → spurious module.
+ *  - empty-section:   a `##` section with no requirement content → empty/stub.
+ */
+export function detectSpecShapeWarnings(
+  ius: ImplementationUnit[],
+  canonNodes: CanonicalNode[],
+  clauses: Clause[],
+): SpecShapeWarning[] {
+  const nodeById = new Map(canonNodes.map(n => [n.canon_id, n]));
+  const clauseById = new Map(clauses.map(c => [c.clause_id, c]));
+
+  const keyOf = (c: Clause) => `${c.source_doc_id}\x00${sectionNameOf(c)}`;
+
+  // Seed one SectionShape per (doc, top-level section) from the clauses, so
+  // even sections that produce no module (context-only) are represented.
+  const sections = new Map<string, SectionShape>();
+  for (const c of clauses) {
+    const key = keyOf(c);
+    let s = sections.get(key);
+    if (!s) {
+      const sp = c.section_path;
+      s = {
+        docId: c.source_doc_id,
+        section: sectionNameOf(c),
+        isPreamble: sp[0] === '(preamble)',
+        isBareH1: sp[0] !== '(preamble)' && sp.length === 1,
+        body: '',
+        nonContextNodes: 0,
+        modules: new Set(),
+      };
+      sections.set(key, s);
+    }
+    s.body += '\n' + c.raw_text;
+  }
+
+  // Attribute each non-CONTEXT node (and the module it landed in) to its section.
+  const moduleOfCanon = new Map<string, string>();
+  for (const iu of ius) {
+    for (const id of iu.source_canon_ids) moduleOfCanon.set(id, iu.name);
+  }
+  for (const node of canonNodes) {
+    if (node.type === CanonicalType.CONTEXT) continue;
+    const clause = node.source_clause_ids.map(id => clauseById.get(id)).find(Boolean);
+    if (!clause) continue;
+    const s = sections.get(keyOf(clause));
+    if (!s) continue;
+    s.nonContextNodes++;
+    const mod = moduleOfCanon.get(node.canon_id);
+    if (mod) s.modules.add(mod);
+  }
+
+  const warnings: SpecShapeWarning[] = [];
+
+  // ── F2a: a cohesive UI fragmented across sibling `##` sections ──
+  // UI sections (body hits the lexicon, ≥1 module) that landed in ≥2 distinct
+  // modules didn't compose — flag them so the author can merge to one section.
+  const uiSectionsByDoc = new Map<string, SectionShape[]>();
+  for (const s of sections.values()) {
+    if (s.isPreamble || s.modules.size === 0) continue;
+    if (!UI_LEXICON.test(s.body)) continue;
+    const list = uiSectionsByDoc.get(s.docId) ?? [];
+    list.push(s);
+    uiSectionsByDoc.set(s.docId, list);
+  }
+  for (const uiSections of uiSectionsByDoc.values()) {
+    const modules = new Set<string>();
+    for (const s of uiSections) for (const m of s.modules) modules.add(m);
+    if (uiSections.length >= 2 && modules.size >= 2) {
+      const names = uiSections.map(s => s.section).sort();
+      const quoted = names.map(n => `'${n}'`).join(', ');
+      warnings.push({
+        kind: 'fragmented-ui',
+        message: `These ${names.length} sections each become a separate module; a cohesive UI is usually one module.`,
+        remediation: `Merge sections ${quoted} under one \`## Web Experience\` to generate a single page module.`,
+        headings: names,
+      });
+    }
+  }
+
+  // ── F2b: an intro/preamble carrying normative content → spurious module ──
+  for (const s of sections.values()) {
+    if (!(s.isPreamble || s.isBareH1) || s.nonContextNodes === 0) continue;
+    const where = s.isPreamble ? 'The document intro' : `The overview "${s.section}"`;
+    warnings.push({
+      kind: 'normative-intro',
+      message: `${where} carries requirements, so it becomes its own module.`,
+      remediation: `Make this intro descriptive, or move its requirements into a \`##\` section.`,
+      headings: [s.section],
+      module: [...s.modules][0],
+    });
+  }
+
+  // ── F2c: a `##` section with no requirement content → empty/stub module ──
+  for (const s of sections.values()) {
+    if (s.isPreamble || s.isBareH1 || s.nonContextNodes > 0) continue;
+    warnings.push({
+      kind: 'empty-section',
+      message: `Section "${s.section}" has no requirement content (all context), so it generates an empty/stub module.`,
+      remediation: `Add requirement ('must'/'shall') content to section '${s.section}', or remove it if it is context-only.`,
+      headings: [s.section],
+    });
+  }
+
+  return warnings;
+}
+
+/**
+ * Top-level grouping name for a clause — matches `planIUs`' bucket key:
+ * `section_path[1]` (the `##` under the doc H1), else `section_path[0]`.
+ */
+function sectionNameOf(clause: Clause): string {
+  return clause.section_path.length > 1
+    ? clause.section_path[1]
+    : clause.section_path[0] || 'main';
 }
 
 /**

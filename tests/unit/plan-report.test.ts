@@ -49,3 +49,82 @@ describe('Plan inspection (O5/O10, appendix #5)', () => {
     expect(oversized.estimate.approxTokens).toBeGreaterThan(0);
   });
 });
+
+describe('Spec-shape feedback (F2/F4/F5)', () => {
+  function report(spec: string) {
+    const clauses = parseSpec(spec, 'spec/app.md');
+    const canon = extractCanonicalNodes(clauses);
+    const ius = planIUs(canon, clauses);
+    return analyzePlan(ius, canon, clauses);
+  }
+
+  it('F2a: warns when a cohesive UI is fragmented across multiple ## sections', () => {
+    // A single-page UI described across three sibling sections → three modules.
+    const r = report(
+      `# Notes App\n\n` +
+        `## Loading\n\n- The page must render in the browser within one second.\n- The app must load data on startup.\n\n` +
+        `## Editing\n\n- Each keystroke must update the contenteditable region.\n- The caret must stay visible while typing.\n\n` +
+        `## Styling\n\n- Buttons must use the CSS stylesheet.\n- The layout must show a hover state.`,
+    );
+    const frag = r.warnings.find(w => w.kind === 'fragmented-ui');
+    expect(frag).toBeDefined();
+    // Names the fragmented sections so the author knows what to merge.
+    const headings = frag!.headings.join(' ');
+    expect(headings).toMatch(/Loading/);
+    expect(headings).toMatch(/Editing/);
+    expect(headings).toMatch(/Styling/);
+  });
+
+  it('F5: a single ## Web Experience section produces no fragmentation warning', () => {
+    // The session restructuring (four subsections → one section) is now pre-empted.
+    const r = report(
+      `# Notes App\n\n` +
+        `## Web Experience\n\n` +
+        `- The page must render in the browser.\n` +
+        `- Each keystroke must update the contenteditable region.\n` +
+        `- Buttons must use the CSS stylesheet.`,
+    );
+    expect(r.warnings.find(w => w.kind === 'fragmented-ui')).toBeUndefined();
+  });
+
+  it('F2b: warns when an intro carries normative content (spurious module)', () => {
+    const r = report(
+      `The system must encrypt all data at rest.\nThe service must log every request.\n\n` +
+        `# Service\n\n## Auth\n\n- Users must authenticate.\n- Sessions must expire.`,
+    );
+    const intro = r.warnings.find(w => w.kind === 'normative-intro');
+    expect(intro).toBeDefined();
+    expect(intro!.headings.join(' ')).toMatch(/preamble/);
+  });
+
+  it('F2c: warns when a ## section is context-only (empty/stub module)', () => {
+    const r = report(
+      `# App\n\n## Auth\n\n- Users must authenticate.\n- Sessions must expire.\n\n` +
+        `## Background\n\nThe project began in 2019 as a small side experiment.\nIt grew over time into a larger initiative.`,
+    );
+    const empty = r.warnings.find(w => w.kind === 'empty-section');
+    expect(empty).toBeDefined();
+    expect(empty!.headings.join(' ')).toMatch(/Background/);
+  });
+
+  it('F4: every warning carries a concrete, non-empty remediation', () => {
+    const r = report(
+      `# Notes App\n\n` +
+        `## Loading\n\n- The page must render in the browser within one second.\n- The app must load data on startup.\n\n` +
+        `## Styling\n\n- Buttons must use the CSS stylesheet.\n- The layout must show a hover state.`,
+    );
+    expect(r.warnings.length).toBeGreaterThan(0);
+    for (const w of r.warnings) {
+      expect(w.message.length).toBeGreaterThan(0);
+      expect(w.remediation.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('a well-shaped spec produces no spec-shape warnings', () => {
+    const r = report(
+      `# App\n\n## Auth\n\n- Users must authenticate.\n- Sessions must expire.\n\n` +
+        `## Billing\n\n- Payments must be processed.\n- Refunds must be supported.`,
+    );
+    expect(r.warnings).toEqual([]);
+  });
+});
