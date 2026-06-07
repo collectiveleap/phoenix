@@ -36,6 +36,11 @@ It also emits **spec-shape warnings**, each with a concrete fix:
 | `fragmented-ui` | A cohesive UI is split across multiple `##` sections that won't compose. | Merge those sections under one `## Web Experience`. |
 | `normative-intro` | An intro/preamble carries requirements and becomes its own module. | Make the intro descriptive, or move its requirements into a `##` section. |
 | `empty-section` | A `##` section has no requirement content. | Add `must`/`shall` content, or remove the section if it's context-only. |
+| `over-output-budget` | A module's estimated *output* is likely to exceed the generation token budget and would be truncated mid-generation. | Raise `PHOENIX_GENERATE_MAX_TOKENS`, or split the section into smaller `##` sections. |
+
+The `over-output-budget` estimate is output-size aware: a web-UI module emits an entire
+inline-HTML SPA, so it produces far more output per source node than a compact API handler.
+A large single-page UI is the common case that trips it.
 
 A well-shaped spec prints `✓ Spec shape looks good`.
 

@@ -224,13 +224,37 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     };
 
     const results = await generateAll(pending, regenCtx);
+    const failedModules: { name: string; remediation: string }[] = [];
     for (const result of results) {
+      // A hard-failed module (e.g. over the output-token budget) produced no
+      // usable output — write nothing, record nothing, report the remediation (T3).
+      if (result.failed) {
+        const iu = pending.find(u => u.iu_id === result.iu_id);
+        failedModules.push({ name: iu?.name ?? result.iu_id, remediation: result.failed.remediation });
+        continue;
+      }
       for (const [filePath, content] of result.files) {
         const full = join(projectRoot, filePath);
         mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, content, 'utf8');
       }
       manifestManager.recordIU(result.manifest);
+    }
+    if (failedModules.length > 0) {
+      const detail = failedModules.map(m => m.remediation).join(' ');
+      journal.endStage('generate', 'failed', {
+        generated: results.length - failedModules.length,
+        failed: failedModules.length,
+        skipped: completed.length,
+        modules: failedModules.map(m => m.name),
+      });
+      journal.endRun('failed', { failedStage: 'generate', error: detail });
+      return {
+        ok: false,
+        runId: journal.runId,
+        failedStage: 'generate',
+        error: `${failedModules.length} module(s) exceeded the output token budget — ${detail}`,
+      };
     }
     journal.endStage('generate', 'ok', { generated: results.length, skipped: completed.length });
 

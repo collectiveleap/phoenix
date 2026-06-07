@@ -459,6 +459,12 @@ async function cmdBootstrap(): Promise<void> {
   const manifestManager = new ManifestManager(phoenixDir);
   const regenResults = await generateAll(ius, regenCtx);
   for (const result of regenResults) {
+    // A hard-failed module (e.g. over the output-token budget) produced no
+    // usable output — write nothing and report the remediation (T3).
+    if (result.failed) {
+      console.log(`    ${red('✖')} ${result.iu_id.slice(0, 8)}… ${dim(result.failed.remediation)}`);
+      continue;
+    }
     for (const [filePath, content] of result.files) {
       const fullPath = join(projectRoot, filePath);
       mkdirSync(join(fullPath, '..'), { recursive: true });
@@ -1037,11 +1043,12 @@ function cmdPlan(): void {
       : iu.risk_tier === 'high' ? yellow
       : iu.risk_tier === 'medium' ? cyan
       : green;
-    console.log(`  ${bold(iu.name)}${m?.oversized ? ` ${yellow('⚠ OVERSIZED')}` : ''}`);
+    const flags = `${m?.oversized ? ` ${yellow('⚠ OVERSIZED')}` : ''}${m?.overBudget ? ` ${red('⚠ OVER BUDGET')}` : ''}`;
+    console.log(`  ${bold(iu.name)}${flags}`);
     console.log(`    ${dim('ID:')}       ${iu.iu_id.slice(0, 12)}…`);
     console.log(`    ${dim('Risk:')}     ${riskColor(iu.risk_tier)}`);
     console.log(`    ${dim('Kind:')}     ${iu.kind}${m ? ` ${dim('·')} role: ${m.role}` : ''}`);
-    console.log(`    ${dim('Sources:')}  ${iu.source_canon_ids.length} canonical nodes${m ? dim(` (~${m.estimate.approxTokens} tok est.)`) : ''}`);
+    console.log(`    ${dim('Sources:')}  ${iu.source_canon_ids.length} canonical nodes${m ? dim(` (~${m.estimate.outputTokens} tok output est.)`) : ''}`);
     console.log(`    ${dim('Output:')}   ${iu.output_files.join(', ')}`);
     if (m && m.headings.length > 0) {
       console.log(`    ${dim('Headings:')} ${m.headings.join(', ')}`);
@@ -1152,6 +1159,14 @@ async function cmdRegen(args: string[]): Promise<void> {
   const results = await generateAll(targetIUs, regenCtx);
 
   for (const result of results) {
+    // A hard-failed module (e.g. over the output-token budget) produced no
+    // usable output — write nothing and report the remediation (T3).
+    if (result.failed) {
+      const iu = targetIUs.find(i => i.iu_id === result.iu_id);
+      console.log(`  ${red('✖')} ${iu?.name || result.iu_id.slice(0, 12)}: ${dim(result.failed.remediation)}`);
+      process.exitCode = 1;
+      continue;
+    }
     for (const [filePath, content] of result.files) {
       const fullPath = join(projectRoot, filePath);
       mkdirSync(join(fullPath, '..'), { recursive: true });

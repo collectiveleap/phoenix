@@ -38,6 +38,18 @@ export interface StreamHooks {
   onChunk?: (totalBytes: number, deltaText: string) => void;
   /** The provider's output stream has ended (before final resolution). */
   onStreamEnd?: () => void;
+  /**
+   * The provider reported the generation's stop reason (e.g. `end_turn`,
+   * `max_tokens` / `length`). Fired at most once, when the reason is known.
+   * A `max_tokens`/`length` reason means the output was truncated at the budget,
+   * not a stall — the harness uses this to avoid futile retries (T2/T3).
+   */
+  onStopReason?: (reason: string) => void;
+}
+
+/** Normalize a provider's truncation stop reason. */
+export function isTruncationStopReason(reason: string | undefined): boolean {
+  return reason === 'max_tokens' || reason === 'length';
 }
 
 export interface GenerateOptions {

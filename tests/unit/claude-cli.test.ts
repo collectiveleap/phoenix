@@ -151,6 +151,27 @@ describe('stream-json line parsing (S1: extract text, not JSON)', () => {
     expect(parseStreamJsonLine('  ')).toEqual({});
     expect(parseStreamJsonLine('not json {')).toEqual({});
   });
+
+  it('surfaces a max_tokens stop_reason from an assistant event (T2)', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'partial' }], stop_reason: 'max_tokens' },
+    });
+    expect(parseStreamJsonLine(line)).toEqual({ text: 'partial', stopReason: 'max_tokens' });
+  });
+
+  it('surfaces stop_reason from a message_delta event', () => {
+    const line = JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'max_tokens' } });
+    expect(parseStreamJsonLine(line)).toEqual({ stopReason: 'max_tokens' });
+  });
+
+  it('carries end_turn stop_reason alongside assistant text', () => {
+    const line = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' },
+    });
+    expect(parseStreamJsonLine(line)).toEqual({ text: 'done', stopReason: 'end_turn' });
+  });
 });
 
 describe('Claude CLI streaming (S1/S2: incremental output, not a single end-jump)', () => {
@@ -210,5 +231,62 @@ describe('Claude CLI streaming (S1/S2: incremental output, not a single end-jump
     ]);
     const provider = new ClaudeCliProvider('sonnet', bin);
     await expect(provider.generateStream('p')).rejects.toThrow(/Claude CLI error: boom/);
+  });
+
+  /** A fake `claude` that echoes the output-budget env var into its result. */
+  function writeEnvEchoCli(): string {
+    const p = join(dir, 'claude');
+    writeFileSync(
+      p,
+      `#!/bin/sh\n` +
+      `if [ "$1" = "--version" ]; then echo "fake 1.0.0"; exit 0; fi\n` +
+      `cat > /dev/null\n` +
+      `printf '%s\\n' "{\\"type\\":\\"result\\",\\"subtype\\":\\"success\\",\\"is_error\\":false,\\"result\\":\\"budget=\${CLAUDE_CODE_MAX_OUTPUT_TOKENS}\\"}"\n`,
+    );
+    chmodSync(p, 0o755);
+    return p;
+  }
+
+  it('forwards maxTokens to the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS (T1)', async () => {
+    const provider = new ClaudeCliProvider('sonnet', writeEnvEchoCli());
+    const out = await provider.generateStream('p', { maxTokens: 42424 });
+    expect(out).toBe('budget=42424');
+  });
+
+  it('does not set the budget env when no maxTokens is given', async () => {
+    const provider = new ClaudeCliProvider('sonnet', writeEnvEchoCli());
+    const out = await provider.generateStream('p');
+    expect(out).toBe('budget=');
+  });
+
+  it('settles promptly on a max_tokens truncation instead of waiting out the freeze (T2)', async () => {
+    // Emit a truncation event, then "freeze" (long sleep) as the real CLI does
+    // after hitting the cap. The provider must settle immediately, not hang.
+    const p = join(dir, 'claude');
+    const ev = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'export const partial =' }], stop_reason: 'max_tokens' },
+    }).replace(/'/g, "'\\''");
+    writeFileSync(
+      p,
+      `#!/bin/sh\n` +
+      `if [ "$1" = "--version" ]; then echo "fake 1.0.0"; exit 0; fi\n` +
+      `cat > /dev/null\n` +
+      `printf '%s\\n' '${ev}'\n` +
+      `sleep 10\n`,
+    );
+    chmodSync(p, 0o755);
+
+    const provider = new ClaudeCliProvider('sonnet', p);
+    let stopReason: string | undefined;
+    const start = Date.now();
+    const out = await provider.generateStream('p', undefined, {
+      onStopReason: r => { stopReason = r; },
+    });
+    const elapsed = Date.now() - start;
+
+    expect(stopReason).toBe('max_tokens');
+    expect(out).toContain('export const partial =');
+    expect(elapsed).toBeLessThan(5000); // did not wait out the 10s freeze
   });
 });

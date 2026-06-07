@@ -62,7 +62,10 @@ export class AnthropicProvider implements LLMProvider {
 
     for await (const data of sseData(res.body)) {
       if (data === '[DONE]') break;
-      let ev: { type?: string; delta?: { type?: string; text?: string } };
+      let ev: {
+        type?: string;
+        delta?: { type?: string; text?: string; stop_reason?: string };
+      };
       try {
         ev = JSON.parse(data);
       } catch {
@@ -78,6 +81,11 @@ export class AnthropicProvider implements LLMProvider {
         out += text;
         bytes += Buffer.byteLength(text, 'utf8');
         hooks?.onChunk?.(bytes, text);
+      }
+      // message_delta carries the terminal stop_reason — `max_tokens` means the
+      // output was truncated at the budget, recognized as truncation not a stall.
+      if (ev.type === 'message_delta' && typeof ev.delta?.stop_reason === 'string') {
+        hooks?.onStopReason?.(ev.delta.stop_reason);
       }
     }
     hooks?.onStreamEnd?.();

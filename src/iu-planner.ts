@@ -18,6 +18,7 @@ import type { ImplementationUnit } from './models/iu.js';
 import { defaultBoundaryPolicy, defaultEnforcement } from './models/iu.js';
 import { sha256 } from './semhash.js';
 import { deriveInterfaces } from './scaffold.js';
+import { GENERATE_MAX_TOKENS } from './regen.js';
 
 /**
  * Plan IUs from canonical nodes, grouping by source document + section.
@@ -154,8 +155,15 @@ export interface PlanModuleReport {
   /** Source headings (doc › section) that fed this module. */
   headings: string[];
   oversized: boolean;
+  /**
+   * Likely to exceed the output-token budget at generation (T4) — the
+   * output-size basis for the oversize risk, distinct from `oversized` (a
+   * source-node-count proxy). A web-UI module that emits a large SPA trips this
+   * before generation burns attempts.
+   */
+  overBudget: boolean;
   /** Up-front cost estimate so risk is visible before generation. */
-  estimate: { nodes: number; approxTokens: number };
+  estimate: { nodes: number; approxTokens: number; outputTokens: number };
 }
 
 export interface PlanReport {
@@ -174,7 +182,7 @@ export interface PlanReport {
  * advises; it never rewrites the spec.
  */
 export interface SpecShapeWarning {
-  kind: 'fragmented-ui' | 'normative-intro' | 'empty-section';
+  kind: 'fragmented-ui' | 'normative-intro' | 'empty-section' | 'over-output-budget';
   /** What will generate poorly. */
   message: string;
   /** The concrete fix to apply to the spec. */
@@ -197,11 +205,29 @@ const UI_LEXICON =
 export interface PlanReportOptions {
   /** Node-count threshold for the oversize flag. */
   sizeThreshold?: number;
+  /**
+   * Output-token budget a module's estimated output must stay under to avoid an
+   * `over-output-budget` warning (T4). Defaults to the generator's budget
+   * (`GENERATE_MAX_TOKENS`, env `PHOENIX_GENERATE_MAX_TOKENS`).
+   */
+  outputBudget?: number;
 }
 
 /** Rough generation-size proxy: ~150 tokens of output per source node. */
 function approxTokensFor(nodeCount: number): number {
   return nodeCount * 150;
+}
+
+/**
+ * Role-aware output-token estimate — the *output* basis for the budget flag (T4).
+ * A web-UI module emits an entire inline-HTML SPA (page shell + per-feature UI),
+ * so it produces far more output per source node than a compact API handler.
+ * This is the genuine output signal the diagnosis asked for, replacing the prior
+ * source-node-count-only proxy.
+ */
+export function estimateOutputTokens(role: 'api' | 'web-ui', nodeCount: number): number {
+  if (role === 'web-ui') return 6000 + nodeCount * 1500; // SPA shell + per-feature UI
+  return nodeCount * 200; // API handlers are compact
 }
 
 /**
@@ -216,6 +242,7 @@ export function analyzePlan(
   opts?: PlanReportOptions,
 ): PlanReport {
   const threshold = opts?.sizeThreshold ?? DEFAULT_IU_SIZE_THRESHOLD;
+  const outputBudget = opts?.outputBudget ?? GENERATE_MAX_TOKENS;
   const nodeById = new Map(canonNodes.map(n => [n.canon_id, n]));
   const clauseById = new Map(clauses.map(c => [c.clause_id, c]));
   const roleByIuId = new Map(deriveInterfaces(ius, canonNodes).map(e => [e.iu_id, e.role]));
@@ -245,24 +272,43 @@ export function analyzePlan(
     const sortedHeadings = [...headings].sort();
     for (const h of sortedHeadings) headingToModule.push({ heading: h, module: iu.name });
 
+    const role = roleByIuId.get(iu.iu_id) ?? 'api';
+    const outputTokens = estimateOutputTokens(role, nodeCount);
+
     modules.push({
       iu_id: iu.iu_id,
       name: iu.name,
       outputPath: iu.output_files[0] ?? '',
-      role: roleByIuId.get(iu.iu_id) ?? 'api',
+      role,
       sourceNodeCount: nodeCount,
       headings: sortedHeadings,
       oversized: nodeCount > threshold,
-      estimate: { nodes: nodeCount, approxTokens: approxTokensFor(nodeCount) },
+      overBudget: outputTokens > outputBudget,
+      estimate: { nodes: nodeCount, approxTokens: approxTokensFor(nodeCount), outputTokens },
     });
   }
+
+  // Over-budget modules become spec-shape warnings with the same remediation as
+  // the generation-time hard-fail (T3/T4), so the author hears it at plan time.
+  const budgetWarnings: SpecShapeWarning[] = modules
+    .filter(m => m.overBudget)
+    .map(m => ({
+      kind: 'over-output-budget' as const,
+      message:
+        `${m.name} is likely to exceed the output token budget ` +
+        `(~${m.estimate.outputTokens} tokens > ${outputBudget}) and would be truncated at generation.`,
+      remediation:
+        `Raise PHOENIX_GENERATE_MAX_TOKENS or split '${m.name}' into smaller \`##\` sections.`,
+      headings: m.headings,
+      module: m.name,
+    }));
 
   return {
     modules,
     headingToModule: headingToModule.sort((a, b) => a.heading.localeCompare(b.heading)),
     sizeThreshold: threshold,
     oversizedCount: modules.filter(m => m.oversized).length,
-    warnings: detectSpecShapeWarnings(ius, canonNodes, clauses),
+    warnings: [...detectSpecShapeWarnings(ius, canonNodes, clauses), ...budgetWarnings],
   };
 }
 

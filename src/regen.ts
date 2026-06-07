@@ -22,16 +22,44 @@ import type { InterfaceEntry } from './scaffold.js';
 import { sha256 } from './semhash.js';
 import { probeTypechecker, typecheckProject } from './harness/typecheck.js';
 import type { TypecheckResult } from './harness/typecheck.js';
-import { recordedGenerate } from './observe/instrument.js';
+import { recordedGenerate, TruncationError } from './observe/instrument.js';
 import { supervisedGenerate } from './observe/watchdog.js';
+import { isTruncationStopReason } from './llm/provider.js';
 import type { RunJournal, HealthBudgets } from './observe/journal.js';
 
 const TOOLCHAIN_VERSION = 'phoenix-regen/0.1.0';
+
+/**
+ * A module whose generated output exceeded the output-token budget (T3). This is
+ * deterministic — retrying hits the identical ceiling — so it is never retried;
+ * the module hard-fails with an actionable remediation instead of a stub.
+ */
+export class OutputBudgetExceededError extends Error {
+  readonly iuName: string;
+  readonly budget: number;
+  readonly remediation: string;
+  constructor(iuName: string, budget: number) {
+    const remediation =
+      `${iuName} output exceeded the ${budget}-token budget — ` +
+      `raise PHOENIX_GENERATE_MAX_TOKENS or split the spec section.`;
+    super(remediation);
+    this.name = 'OutputBudgetExceededError';
+    this.iuName = iuName;
+    this.budget = budget;
+    this.remediation = remediation;
+  }
+}
 
 export interface RegenResult {
   iu_id: string;
   files: Map<string, string>;    // path → content
   manifest: IUManifest;
+  /**
+   * Set when the module hard-failed and produced no usable output — e.g. its
+   * output exceeded the token budget (T3). The caller skips writing files for a
+   * failed result and reports the remediation; no stub is substituted.
+   */
+  failed?: { reason: string; remediation: string };
 }
 
 export interface RegenContext {
@@ -57,6 +85,8 @@ export interface RegenContext {
   maxRepairs?: number;
   /** Backoff between generation retries, in ms (× attempt). Default 0. */
   backoffMs?: number;
+  /** Output-token budget for generation calls. Default GENERATE_MAX_TOKENS. */
+  maxTokens?: number;
   /** Callback for progress reporting. */
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
 }
@@ -78,9 +108,21 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
         content = await generateWithLLM(iu, ctx);
         ctx.onProgress?.(iu, 'done');
       } catch (err) {
+        // Over budget (truncation) is deterministic — hard-fail the module with
+        // a remediation rather than retrying or substituting a stub (T3).
+        if (err instanceof OutputBudgetExceededError || err instanceof TruncationError) {
+          const e = err instanceof OutputBudgetExceededError
+            ? err
+            : new OutputBudgetExceededError(iu.name, ctx.maxTokens ?? GENERATE_MAX_TOKENS);
+          ctx.onProgress?.(iu, 'error', e.remediation);
+          ctx.journal?.event('module_failed', {
+            iu: iu.name, reason: 'over_output_budget', remediation: e.remediation,
+          });
+          return failedResult(iu, modelId, e.remediation);
+        }
         const msg = err instanceof Error ? err.message : String(err);
         ctx.onProgress?.(iu, 'error', msg);
-        // Fall back to stub on LLM failure
+        // Fall back to stub on other (transient) LLM failures.
         content = ctx.target ? generateArchStub(iu) : generateModule(iu);
       }
     } else {
@@ -123,6 +165,25 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
 }
 
 /**
+ * Build a hard-failed RegenResult: no files, a marker manifest, and the
+ * remediation. The caller writes nothing for this IU and reports the failure.
+ */
+function failedResult(iu: ImplementationUnit, modelId: string, remediation: string): RegenResult {
+  const metadata: RegenMetadata = {
+    model_id: modelId,
+    promptpack_hash: sha256(JSON.stringify(iu.contract)),
+    toolchain_version: TOOLCHAIN_VERSION,
+    generated_at: new Date().toISOString(),
+  };
+  return {
+    iu_id: iu.iu_id,
+    files: new Map(),
+    manifest: { iu_id: iu.iu_id, iu_name: iu.name, files: {}, regen_metadata: metadata },
+    failed: { reason: 'over_output_budget', remediation },
+  };
+}
+
+/**
  * Generate code for all IUs. Runs sequentially to respect LLM rate limits.
  */
 export async function generateAll(ius: ImplementationUnit[], ctx?: RegenContext): Promise<RegenResult[]> {
@@ -137,6 +198,19 @@ export async function generateAll(ius: ImplementationUnit[], ctx?: RegenContext)
 
 /** Default typecheck-repair iteration cap when `ctx.maxRepairs` is unset. */
 const MAX_RETRIES = 2;
+
+/**
+ * Output-token budget for module generation. The old hardcoded 8192 truncated a
+ * full inline-HTML web-UI module at ~32 KB — the model hit the cap, the stream
+ * froze, and the watchdog killed+retried it futilely (see TOKEN-BUDGET-DIAGNOSIS).
+ * 32000 tokens ≈ 120 KB of output, comfortably above a normal SPA module.
+ * Override per-run with PHOENIX_GENERATE_MAX_TOKENS or `ctx.maxTokens`.
+ *
+ * NOTE: for the claude-cli provider this value is only honoured because
+ * `ClaudeCliProvider` forwards it to the CLI via CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+ * the CLI has no max-output-tokens flag.
+ */
+export const GENERATE_MAX_TOKENS = Number(process.env.PHOENIX_GENERATE_MAX_TOKENS) || 32000;
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -171,14 +245,21 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   // Route every LLM call through the journal when one is present (O1). When
   // watchdog budgets are also set, supervise the call so stalls are killed
   // (O2/O8); otherwise record-only; otherwise plain generation.
-  const callLLM = (p: string, opts: GenerateOptions, attempt: number): Promise<string> => {
+  const callLLM = async (p: string, opts: GenerateOptions, attempt: number): Promise<string> => {
     if (journal && budgets) {
       return supervisedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt }, { budgets });
     }
     if (journal) {
       return recordedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt });
     }
-    return llm.generate(p, opts);
+    // No-journal path: still observe the stop reason so an over-budget call is
+    // surfaced as a TruncationError, not silently returned and repaired futilely.
+    let stopReason: string | undefined;
+    const text = await llm.generateStream(p, opts, { onStopReason: r => { stopReason = r; } });
+    if (isTruncationStopReason(stopReason)) {
+      throw new TruncationError(stopReason!, Buffer.byteLength(text, 'utf8'), text);
+    }
+    return text;
   };
 
   // Generation retry (B6): a hard call failure — notably the known intermittent
@@ -187,13 +268,14 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   // miss. Reliability of the call is the harness's job, not the user's.
   const maxRetries = ctx.maxRetries ?? 0;
   const backoffMs = ctx.backoffMs ?? 0;
+  const maxTokens = ctx.maxTokens ?? GENERATE_MAX_TOKENS;
 
   const generateOnce = async (): Promise<string> => {
     if (template) {
-      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens: 8192 }, 0);
+      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens }, 0);
       return assembleFromTemplate(template, raw, iu);
     }
-    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens: 8192 }, 0));
+    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens }, 0));
   };
 
   let code: string;
@@ -202,6 +284,9 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       code = await generateOnce();
       break;
     } catch (err) {
+      // Truncation is deterministic — retrying hits the identical ceiling. Do not
+      // count it toward maxRetries; surface it immediately as over-budget (T3).
+      if (err instanceof TruncationError) throw err;
       if (genAttempt >= maxRetries) throw err;
       journal?.event('generate_retry', {
         iu: iu.name,
@@ -255,7 +340,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
         // Feed errors back to the LLM with the current code.
         const fixResponse = await callLLM(
           buildFixPrompt(code, result.errors),
-          { system: systemPrompt, temperature: 0.1, maxTokens: 8192 },
+          { system: systemPrompt, temperature: 0.1, maxTokens },
           attempt + 1,
         );
         code = template ? assembleFromTemplate(template, fixResponse, iu) : cleanCodeResponse(fixResponse);

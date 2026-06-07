@@ -64,12 +64,16 @@ export class OpenAIProvider implements LLMProvider {
 
     for await (const data of sseData(res.body)) {
       if (data === '[DONE]') break;
-      let ev: { choices?: Array<{ delta?: { content?: string } }> };
+      let ev: { choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }> };
       try {
         ev = JSON.parse(data);
       } catch {
         continue;
       }
+      // finish_reason `length` means the output was truncated at max_tokens —
+      // recognized as truncation, not a stall (mapped to the common signal).
+      const finish = ev.choices?.[0]?.finish_reason;
+      if (typeof finish === 'string') hooks?.onStopReason?.(finish);
       const text = ev.choices?.[0]?.delta?.content ?? '';
       if (text.length === 0) continue;
       if (!firstByteSeen) {

@@ -28,6 +28,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { LLMProvider, GenerateOptions, StreamHooks } from './provider.js';
+import { isTruncationStopReason } from './provider.js';
 
 /**
  * Startup-minimizing flags appended to every invocation (verified against
@@ -161,6 +162,12 @@ export interface StreamJsonChunk {
   result?: string;
   /** True when the terminal `result` event reports an error. */
   isError?: boolean;
+  /**
+   * The generation's stop reason, when an event reports one (e.g. `end_turn`,
+   * `max_tokens`). A `max_tokens` reason means the output was truncated at the
+   * budget — recognized as truncation, not a stall (T2).
+   */
+  stopReason?: string;
 }
 
 interface RawStreamEvent {
@@ -168,9 +175,9 @@ interface RawStreamEvent {
   subtype?: string;
   is_error?: boolean;
   result?: unknown;
-  message?: { content?: Array<{ type?: string; text?: unknown }> };
-  delta?: { type?: string; text?: unknown };
-  event?: { delta?: { type?: string; text?: unknown } };
+  message?: { content?: Array<{ type?: string; text?: unknown }>; stop_reason?: unknown };
+  delta?: { type?: string; text?: unknown; stop_reason?: unknown };
+  event?: { delta?: { type?: string; text?: unknown; stop_reason?: unknown } };
 }
 
 /**
@@ -198,18 +205,27 @@ export function parseStreamJsonLine(line: string): StreamJsonChunk {
   }
 
   // Assistant message — complete text content blocks (default granularity).
+  // Its `stop_reason` (when set) carries truncation: `max_tokens` ⇒ over budget.
   if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
     const text = ev.message.content
       .filter((b): b is { type?: string; text: string } => !!b && b.type === 'text' && typeof b.text === 'string')
       .map(b => b.text)
       .join('');
-    return text ? { text } : {};
+    const stopReason = typeof ev.message.stop_reason === 'string' ? ev.message.stop_reason : undefined;
+    const chunk: StreamJsonChunk = {};
+    if (text) chunk.text = text;
+    if (stopReason) chunk.stopReason = stopReason;
+    return chunk;
   }
 
-  // Partial streaming text deltas, if the CLI emits them.
+  // Partial streaming text deltas, if the CLI emits them. A message_delta event
+  // carries the stop_reason on `delta.stop_reason`.
   const delta = ev.delta ?? ev.event?.delta;
-  if (delta && delta.type === 'text_delta' && typeof delta.text === 'string') {
-    return { text: delta.text };
+  if (delta) {
+    const chunk: StreamJsonChunk = {};
+    if (delta.type === 'text_delta' && typeof delta.text === 'string') chunk.text = delta.text;
+    if (typeof delta.stop_reason === 'string') chunk.stopReason = delta.stop_reason;
+    if (chunk.text || chunk.stopReason) return chunk;
   }
 
   return {};
@@ -253,13 +269,20 @@ export class ClaudeCliProvider implements LLMProvider {
 
     const bin = this.binary();
 
+    // The CLI has no max-output-tokens flag; its output ceiling is the env var
+    // CLAUDE_CODE_MAX_OUTPUT_TOKENS. Forward the caller's budget there so a large
+    // module is not silently truncated at the CLI's default (TOKEN-BUDGET-DIAGNOSIS).
+    const budgetEnv: Record<string, string> = options?.maxTokens
+      ? { CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(options.maxTokens) }
+      : {};
+
     return new Promise<string>((resolve, reject) => {
       // detached → the child leads its own process group, so on abort we can
       // kill the whole subtree (claude + anything it spawns) — no orphans (O11).
       const child = spawn(bin, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true,
-        env: { ...process.env, ...STARTUP_ENV },
+        env: { ...process.env, ...STARTUP_ENV, ...budgetEnv },
       });
 
       let stderr = '';
@@ -272,10 +295,15 @@ export class ClaudeCliProvider implements LLMProvider {
       let streamedText = '';
       let finalResult: string | null = null;
       let resultError: string | null = null;
+      let stopReason: string | null = null;
       const consumeLine = (line: string): string => {
         const c = parseStreamJsonLine(line);
         if (c.result !== undefined) finalResult = c.result;
         if (c.isError) resultError = c.result ?? 'Claude CLI stream reported an error';
+        if (c.stopReason && !stopReason) {
+          stopReason = c.stopReason;
+          hooks?.onStopReason?.(c.stopReason);
+        }
         if (c.text) { streamedText += c.text; return c.text; }
         return '';
       };
@@ -320,8 +348,23 @@ export class ClaudeCliProvider implements LLMProvider {
         // text — so bytesStreamed rises and the watchdog never kills a live
         // call for as long as it produces (S2).
         hooks?.onChunk?.(bytes, delta);
+
+        // Truncation (max_tokens): the model hit the output budget and stops
+        // emitting — the byte stream now freezes. Settle immediately with the
+        // (truncated) text rather than waiting for a close the watchdog would
+        // otherwise misread as a stream-stall and kill (T2). The stopReason
+        // hook already fired; the caller classifies this as over-budget.
+        if (!settled && isTruncationStopReason(stopReason ?? undefined)) {
+          settled = true;
+          options?.signal?.removeEventListener('abort', onAbort);
+          killTree();
+          hooks?.onStreamEnd?.();
+          const out = finalResult ?? streamedText;
+          resolve(out);
+        }
       });
       child.stdout.on('end', () => {
+        if (settled) return; // truncation already settled + fired onStreamEnd
         if (buffer.trim().length > 0) { consumeLine(buffer); buffer = ''; }
         hooks?.onStreamEnd?.();
       });

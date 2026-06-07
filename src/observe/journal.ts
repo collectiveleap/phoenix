@@ -15,8 +15,13 @@
 import { mkdirSync, appendFileSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** Terminal outcome of a single LLM call. */
-export type CallOutcome = 'ok' | 'timeout' | 'error' | 'empty';
+/**
+ * Terminal outcome of a single LLM call.
+ * - `truncated`: completed-but-truncated — the model hit the output-token budget
+ *   (`stop_reason: max_tokens`). Distinct from a stall/timeout: the call returned,
+ *   it just ran out of budget. Deterministic, so it is not retried (T2/T3).
+ */
+export type CallOutcome = 'ok' | 'timeout' | 'error' | 'empty' | 'truncated';
 
 /**
  * Health of a call, derivable from records alone (O1).
@@ -70,6 +75,8 @@ export interface CallRecord {
   bytesStreamed: number;
   tokens?: number;
   outcome?: CallOutcome;
+  /** Provider stop reason, when reported (e.g. `end_turn`, `max_tokens`). */
+  stopReason?: string;
   errorText?: string;
 }
 
@@ -95,6 +102,7 @@ export interface CallEndInfo {
   outcome: CallOutcome;
   bytesStreamed?: number;
   tokens?: number;
+  stopReason?: string;
   errorText?: string;
 }
 
@@ -246,6 +254,7 @@ export class RunJournal {
     rec.outcome = info.outcome;
     if (info.bytesStreamed !== undefined) rec.bytesStreamed = info.bytesStreamed;
     if (info.tokens !== undefined) rec.tokens = info.tokens;
+    if (info.stopReason !== undefined) rec.stopReason = info.stopReason;
     if (info.errorText !== undefined) rec.errorText = info.errorText;
     this.event('call_end', { callId, ...info });
     this.persist();
@@ -290,6 +299,8 @@ export class RunJournal {
    */
   static classify(rec: CallRecord, budgets: HealthBudgets = DEFAULT_BUDGETS, at: number = now()): CallHealth {
     if (rec.outcome === 'ok') return 'completed';
+    // A truncation (over budget) is a resolved call, not a stall — terminal.
+    if (rec.outcome === 'truncated') return 'completed';
     if (rec.endedAt !== undefined) return 'failed';
 
     // Stream finished but the call never finalized → caller is wedged.
