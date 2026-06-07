@@ -65,6 +65,81 @@ function detectProvider(): string | null {
   return null;
 }
 
+/** All providers with usable credentials right now. */
+function availableProviders(): string[] {
+  const available: string[] = [];
+  if (process.env.ANTHROPIC_API_KEY) available.push('anthropic');
+  if (process.env.OPENAI_API_KEY) available.push('openai');
+  if (isClaudeCliAvailable()) available.push('claude-cli');
+  return available;
+}
+
+type Source = 'env' | 'config' | 'auto-detect' | 'default' | 'none';
+
+/** A fully-explained provider resolution (O6: state choice AND its source). */
+export interface ProviderResolution {
+  provider: LLMProvider | null;
+  name: string | null;
+  model: string | null;
+  providerSource: Source;
+  modelSource: Source;
+  available: string[];
+  /** Human-readable warnings about ambiguous or overridden selection. */
+  conflicts: string[];
+}
+
+/**
+ * Resolve the provider AND explain where each choice came from, surfacing any
+ * conflicts (env vs config, or multiple credentials available). Has no side
+ * effects — `resolveProvider` keeps the config-save behaviour.
+ */
+export function resolveProviderInfo(phoenixDir?: string): ProviderResolution {
+  const config = phoenixDir ? loadConfig(phoenixDir) : {};
+  const envProvider = process.env.PHOENIX_LLM_PROVIDER;
+  const envModel = process.env.PHOENIX_LLM_MODEL;
+
+  let name: string | null;
+  let providerSource: Source;
+  if (envProvider) { name = envProvider; providerSource = 'env'; }
+  else if (config.llm?.provider) { name = config.llm.provider; providerSource = 'config'; }
+  else { const d = detectProvider(); name = d; providerSource = d ? 'auto-detect' : 'none'; }
+
+  let model: string | null;
+  let modelSource: Source;
+  if (!name) { model = null; modelSource = 'none'; }
+  else if (envModel) { model = envModel; modelSource = 'env'; }
+  else if (config.llm?.model) { model = config.llm.model; modelSource = 'config'; }
+  else { model = DEFAULT_MODELS[name] || DEFAULT_MODELS.anthropic; modelSource = 'default'; }
+
+  const available = availableProviders();
+  const conflicts: string[] = [];
+  if (envProvider && config.llm?.provider && envProvider !== config.llm.provider) {
+    conflicts.push(`PHOENIX_LLM_PROVIDER=${envProvider} (env) overrides saved config provider '${config.llm.provider}'`);
+  }
+  if (envModel && config.llm?.model && envModel !== config.llm.model) {
+    conflicts.push(`PHOENIX_LLM_MODEL=${envModel} (env) overrides saved config model '${config.llm.model}'`);
+  }
+  // Ambiguous selection: multiple credentials, no explicit override.
+  if (!envProvider && !config.llm?.provider && available.length > 1) {
+    conflicts.push(`Multiple providers available (${available.join(', ')}); defaulting to '${name}'. Set PHOENIX_LLM_PROVIDER to choose explicitly.`);
+  }
+
+  const provider = name ? buildProvider(name, model!) : null;
+  return { provider, name, model, providerSource, modelSource, available, conflicts };
+}
+
+/** One-line + conflict-lines description for CLI output (O6). */
+export function describeResolution(info: ProviderResolution): string[] {
+  const lines: string[] = [];
+  if (!info.name) {
+    lines.push('No LLM provider resolved — falling back to stubs.');
+    return lines;
+  }
+  lines.push(`Provider: ${info.name}/${info.model} (provider from ${info.providerSource}, model from ${info.modelSource})`);
+  for (const c of info.conflicts) lines.push(`⚠ ${c}`);
+  return lines;
+}
+
 /**
  * Build a provider instance.
  */

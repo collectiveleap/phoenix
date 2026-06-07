@@ -47,59 +47,79 @@ function emptyScores(): TypeScores {
 }
 
 /** Score a sentence across all types; highest score wins */
-function scoreSentence(text: string, headingContext: CanonicalType | null): { type: CanonicalType; confidence: number } {
+function scoreSentence(
+  text: string,
+  headingContext: CanonicalType | null,
+): { type: CanonicalType; confidence: number; reason: string } {
   const scores = emptyScores();
   const lower = text.toLowerCase();
+  // Human-readable signals that fired, per type (O4 transparency).
+  const signals: Partial<Record<CanonicalType, string[]>> = {};
+  const note = (type: CanonicalType, signal: string) => {
+    (signals[type] ??= []).push(signal);
+  };
 
   // ── Constraint signals ──
   if (/\b(?:must not|shall not|may not|cannot|can't|disallowed|forbidden|prohibited)\b/i.test(text)) {
     scores[CanonicalType.CONSTRAINT] += CONFIG.CONSTRAINT_NEGATION_WEIGHT;
+    note(CanonicalType.CONSTRAINT, 'negation/prohibition');
   }
   if (/\b(?:limited to|maximum|minimum|at most|at least|no more than|no fewer than|up to|ceiling|floor)\b/i.test(text)) {
     scores[CanonicalType.CONSTRAINT] += CONFIG.CONSTRAINT_LIMIT_WEIGHT;
+    note(CanonicalType.CONSTRAINT, 'limit phrase');
   }
   // Numeric bounds: "5 per minute", "≤ 100", "between 1 and 10"
   if (/\b\d+\s*(?:per|\/)\s*\w+\b/i.test(text) || /[≤≥<>]\s*\d+/.test(text)) {
     scores[CanonicalType.CONSTRAINT] += CONFIG.CONSTRAINT_NUMERIC_WEIGHT;
+    note(CanonicalType.CONSTRAINT, 'numeric bound');
   }
 
   // ── Invariant signals ──
   if (/\b(?:always|never|at all times|regardless|invariant|guaranteed|must remain|must always|must never)\b/i.test(text)) {
     scores[CanonicalType.INVARIANT] += CONFIG.INVARIANT_SIGNAL_WEIGHT;
+    note(CanonicalType.INVARIANT, 'always/never');
   }
 
   // ── Requirement signals ──
   if (/\b(?:must|shall)\b/i.test(text) && !/\b(?:must not|shall not|must always|must never|must remain)\b/i.test(text)) {
     scores[CanonicalType.REQUIREMENT] += CONFIG.REQUIREMENT_MODAL_WEIGHT;
+    note(CanonicalType.REQUIREMENT, 'must/shall modal');
   }
   if (/\b(?:required|requires?|needs? to|has to|will)\b/i.test(text)) {
     scores[CanonicalType.REQUIREMENT] += CONFIG.REQUIREMENT_KEYWORD_WEIGHT;
+    note(CanonicalType.REQUIREMENT, 'requirement keyword');
   }
   if (/\b(?:support|provide|implement|enable|allow|accept|return|create|delete|update|send|receive|handle|manage|track|store|validate|generate)\b/i.test(text)) {
     scores[CanonicalType.REQUIREMENT] += CONFIG.REQUIREMENT_VERB_WEIGHT;
+    note(CanonicalType.REQUIREMENT, 'action verb');
   }
 
   // ── Definition signals ──
   if (/\b(?:is defined as|means|refers to|is a|is an)\b/i.test(text) && text.length < CONFIG.DEFINITION_MAX_LENGTH) {
     scores[CanonicalType.DEFINITION] += CONFIG.DEFINITION_EXPLICIT_WEIGHT;
+    note(CanonicalType.DEFINITION, 'definitional phrase');
   }
   // Colon pattern "Term: definition text" but not enumerations
   if (/^[A-Z][a-zA-Z\s]{2,30}:\s+[A-Z]/.test(text) && !/[:,]\s*$/.test(text)) {
     scores[CanonicalType.DEFINITION] += CONFIG.DEFINITION_COLON_WEIGHT;
+    note(CanonicalType.DEFINITION, 'term: definition pattern');
   }
 
   // ── Context signals (no actionable keywords) ──
   if (!hasAnyModal(lower) && !hasAnyKeyword(lower)) {
     scores[CanonicalType.CONTEXT] += CONFIG.CONTEXT_NO_MODAL_WEIGHT;
+    note(CanonicalType.CONTEXT, 'no modal/keyword');
   }
   // Short sentence without verb-like keywords
   if (text.split(/\s+/).length < 8 && !hasAnyModal(lower)) {
     scores[CanonicalType.CONTEXT] += CONFIG.CONTEXT_SHORT_WEIGHT;
+    note(CanonicalType.CONTEXT, 'short, no modal');
   }
 
   // ── Heading context bonus ──
   if (headingContext) {
     scores[headingContext] += CONFIG.HEADING_CONTEXT_BONUS;
+    note(headingContext, 'heading context');
   }
 
   // ── Also give constraint "must" credit since "must" appears in constraints too ──
@@ -115,11 +135,13 @@ function scoreSentence(text: string, headingContext: CanonicalType | null): { ty
 
   // If nothing scored above 0, it's CONTEXT
   if (winScore === 0) {
-    return { type: CanonicalType.CONTEXT, confidence: CONFIG.MIN_CONFIDENCE };
+    return { type: CanonicalType.CONTEXT, confidence: CONFIG.MIN_CONFIDENCE, reason: 'no classifying signals → CONTEXT' };
   }
 
+  const why = signals[winType]?.length ? signals[winType]!.join(', ') : 'highest score';
+  const reason = `${why} → ${winType} (score ${winScore}, runner-up ${runnerUp})`;
   const confidence = Math.max(CONFIG.MIN_CONFIDENCE, Math.min(CONFIG.MAX_CONFIDENCE, (winScore - runnerUp) / Math.max(winScore, 1)));
-  return { type: winType, confidence };
+  return { type: winType, confidence, reason };
 }
 
 function hasAnyModal(lower: string): boolean {
@@ -193,7 +215,7 @@ function extractFromClause(clause: Clause): { candidates: CandidateNode[]; cover
       continue;
     }
 
-    const { type, confidence } = scoreSentence(content, headingContext);
+    const { type, confidence, reason } = scoreSentence(content, headingContext);
     const tags = extractTerms(normalizedStatement);
 
     const candidateId = sha256([type, normalizedStatement, clause.clause_id].join('\x00'));
@@ -207,6 +229,7 @@ function extractFromClause(clause: Clause): { candidates: CandidateNode[]; cover
       tags,
       sentence_index: sentence.index,
       extraction_method: 'rule',
+      classification_reason: reason,
     });
 
     if (type === CanonicalType.CONTEXT) {

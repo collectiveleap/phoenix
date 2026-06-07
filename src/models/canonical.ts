@@ -57,6 +57,8 @@ export interface CandidateNode {
   tags: string[];
   sentence_index: number;
   extraction_method: 'rule' | 'llm';
+  /** Why the rule-based classifier assigned this type (O4 transparency). */
+  classification_reason?: string;
 }
 
 /** Extraction coverage per clause */

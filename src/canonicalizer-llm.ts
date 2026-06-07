@@ -16,43 +16,133 @@ import { sha256 } from './semhash.js';
 import { extractCandidates } from './canonicalizer.js';
 import { resolveGraph } from './resolution.js';
 import { CONFIG } from './experiment-config.js';
+import type { RunJournal } from './observe/journal.js';
+import { recordPlainGenerate } from './observe/instrument.js';
 
 export interface LLMCanonOptions {
   /** Enable self-consistency with k samples (default: 1 = no self-consistency) */
   selfConsistencyK?: number;
+  /** Run journal — records every LLM call (O1) and per-clause classification (O4). */
+  journal?: RunJournal;
+}
+
+/**
+ * What canonicalization actually did — so callers report it honestly (O4).
+ * `mode` reflects the OUTCOME, not merely whether a provider was available:
+ * if every LLM call failed and fell back to rules, mode is 'rule-based'.
+ */
+export interface CanonStats {
+  mode: 'rule-based' | 'llm-normalized';
+  llmAttempted: boolean;
+  llmCalls: number;
+  llmNodeCount: number;
+  ruleNodeCount: number;
+  totalNodes: number;
+  /** The outer fallback fired (the whole LLM pass threw). */
+  fellBackToRules: boolean;
+}
+
+export interface CanonResult {
+  nodes: CanonicalNode[];
+  stats: CanonStats;
+}
+
+/**
+ * Canonicalize clauses, returning the nodes AND an honest account of how they
+ * were produced (O4). Rule-based extraction is always run first; the LLM only
+ * normalizes. Records every LLM call and per-clause classification to the
+ * journal when one is supplied.
+ */
+export async function canonicalize(
+  clauses: Clause[],
+  llm: LLMProvider | null,
+  options?: LLMCanonOptions,
+): Promise<CanonResult> {
+  const journal = options?.journal;
+
+  // Phase 1: rule-based extraction (always deterministic).
+  const { candidates } = extractCandidates(clauses);
+
+  // Record each clause's classification with the reason it got that class (O4).
+  if (journal) {
+    for (const c of candidates) {
+      journal.event('classification', {
+        clause_id: c.source_clause_ids[0],
+        canon_type: c.type,
+        method: c.extraction_method,
+        reason: c.classification_reason ?? null,
+        statement: c.statement.slice(0, 120),
+      });
+    }
+  }
+
+  if (!llm || candidates.length === 0) {
+    const nodes = resolveGraph(candidates, clauses);
+    return {
+      nodes,
+      stats: {
+        mode: 'rule-based', llmAttempted: false, llmCalls: 0,
+        llmNodeCount: 0, ruleNodeCount: nodes.length, totalNodes: nodes.length, fellBackToRules: false,
+      },
+    };
+  }
+
+  let normalized: CandidateNode[];
+  let llmCalls = 0;
+  let fellBack = false;
+  try {
+    const k = options?.selfConsistencyK ?? 1;
+    const res = await normalizeCandidates(candidates, llm, k, journal);
+    normalized = res.candidates;
+    llmCalls = res.llmCalls;
+  } catch {
+    normalized = candidates;
+    fellBack = true;
+  }
+
+  const nodes = resolveGraph(normalized, clauses);
+  const llmNodeCount = nodes.filter(n => n.extraction_method === 'llm').length;
+  // Honest: only claim 'llm-normalized' if LLM actually produced nodes.
+  const mode: CanonStats['mode'] = llmNodeCount > 0 ? 'llm-normalized' : 'rule-based';
+
+  return {
+    nodes,
+    stats: {
+      mode, llmAttempted: true, llmCalls, llmNodeCount,
+      ruleNodeCount: nodes.length - llmNodeCount, totalNodes: nodes.length, fellBackToRules: fellBack,
+    },
+  };
 }
 
 /**
  * Extract canonical nodes using rule-based extraction + LLM normalization.
- * Falls back to pure rule-based on any LLM failure.
+ * Falls back to pure rule-based on any LLM failure. (Thin wrapper over
+ * `canonicalize` for callers that only need the nodes.)
  */
 export async function extractCanonicalNodesLLM(
   clauses: Clause[],
   llm: LLMProvider | null,
   options?: LLMCanonOptions,
 ): Promise<CanonicalNode[]> {
-  // Phase 1: rule-based extraction (always deterministic)
-  const { candidates } = extractCandidates(clauses);
-
-  if (!llm || candidates.length === 0) {
-    return resolveGraph(candidates, clauses);
-  }
-
-  try {
-    const k = options?.selfConsistencyK ?? 1;
-    const normalized = await normalizeCandidates(candidates, llm, k);
-    return resolveGraph(normalized, clauses);
-  } catch {
-    return resolveGraph(candidates, clauses);
-  }
+  return (await canonicalize(clauses, llm, options)).nodes;
 }
 
 async function normalizeCandidates(
   candidates: CandidateNode[],
   llm: LLMProvider,
   k: number = 1,
-): Promise<CandidateNode[]> {
+  journal?: RunJournal,
+): Promise<{ candidates: CandidateNode[]; llmCalls: number }> {
   const results: CandidateNode[] = [];
+  let llmCalls = 0;
+
+  // Route through the journal when present so every call appears in O1 records.
+  const gen = (prompt: string, opts: Parameters<LLMProvider['generate']>[1]): Promise<string> => {
+    llmCalls++;
+    return journal
+      ? recordPlainGenerate(journal, llm, prompt, opts, { stage: 'canonicalize', attempt: 0 })
+      : llm.generate(prompt, opts);
+  };
 
   for (const c of candidates) {
     if (c.type === CanonicalType.CONTEXT) {
@@ -65,7 +155,7 @@ async function normalizeCandidates(
 
       if (k <= 1) {
         // Single-shot normalization
-        const response = await llm.generate(prompt, {
+        const response = await gen(prompt, {
           system: CONFIG.LLM_NORMALIZER_SYSTEM,
           temperature: CONFIG.LLM_NORMALIZER_TEMPERATURE,
           maxTokens: CONFIG.LLM_NORMALIZER_MAX_TOKENS,
@@ -81,7 +171,7 @@ async function normalizeCandidates(
         // Self-consistency: generate k samples, select lexical medoid
         const samples: string[] = [];
         for (let i = 0; i < k; i++) {
-          const response = await llm.generate(prompt, {
+          const response = await gen(prompt, {
             system: CONFIG.LLM_NORMALIZER_SYSTEM,
             temperature: i === 0 ? CONFIG.LLM_NORMALIZER_TEMPERATURE : CONFIG.LLM_CONSISTENCY_TEMPERATURE,
             maxTokens: CONFIG.LLM_NORMALIZER_MAX_TOKENS,
@@ -103,7 +193,7 @@ async function normalizeCandidates(
     }
   }
 
-  return results;
+  return { candidates: results, llmCalls };
 }
 
 /**

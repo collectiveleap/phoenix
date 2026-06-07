@@ -10,17 +10,21 @@
  * and auto-detected from env vars.
  */
 
-import { execSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
-import type { LLMProvider } from './llm/provider.js';
+import type { LLMProvider, GenerateOptions } from './llm/provider.js';
 import { buildPrompt, getSystemPrompt } from './llm/prompt.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import type { InterfaceEntry } from './scaffold.js';
 import { sha256 } from './semhash.js';
+import { probeTypechecker, typecheckProject } from './harness/typecheck.js';
+import type { TypecheckResult } from './harness/typecheck.js';
+import { recordedGenerate } from './observe/instrument.js';
+import { supervisedGenerate } from './observe/watchdog.js';
+import type { RunJournal, HealthBudgets } from './observe/journal.js';
 
 const TOOLCHAIN_VERSION = 'phoenix-regen/0.1.0';
 
@@ -43,6 +47,10 @@ export interface RegenContext {
   target?: ResolvedTarget | null;
   /** Interface registry — shared mount paths for all IUs. */
   interfaces?: InterfaceEntry[];
+  /** Run journal — when present, every LLM call and typecheck self-records (O1/O3). */
+  journal?: RunJournal;
+  /** Watchdog stall budgets — when present (with a journal), calls are supervised (O2/O8). */
+  budgets?: HealthBudgets;
   /** Callback for progress reporting. */
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
 }
@@ -61,7 +69,7 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     if (ctx?.llm && ctx.canonNodes) {
       ctx.onProgress?.(iu, 'start', `Generating ${iu.name} via ${ctx.llm.name}…`);
       try {
-        content = await generateWithLLM(iu, ctx.llm, ctx.canonNodes, ctx.allIUs, ctx.projectRoot, ctx.target, ctx.interfaces);
+        content = await generateWithLLM(iu, ctx);
         ctx.onProgress?.(iu, 'done');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -133,15 +141,11 @@ const MAX_RETRIES = 2;
  *
  * Both modes include typecheck-and-retry.
  */
-async function generateWithLLM(
-  iu: ImplementationUnit,
-  llm: LLMProvider,
-  canonNodes: CanonicalNode[],
-  allIUs?: ImplementationUnit[],
-  projectRoot?: string,
-  target?: ResolvedTarget | null,
-  interfaces?: InterfaceEntry[],
-): Promise<string> {
+async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promise<string> {
+  const llm = ctx.llm;
+  if (!llm) throw new Error('generateWithLLM requires an LLM provider');
+  const { canonNodes = [], allIUs, projectRoot, target, interfaces, journal, budgets } = ctx;
+
   // Find sibling interface entries in the same service
   const iuDir = iu.output_files[0]?.split('/').slice(0, -1).join('/');
   const siblingIUIds = new Set(
@@ -155,44 +159,75 @@ async function generateWithLLM(
   const prompt = buildPrompt(iu, canonNodes, siblingEntries, target);
   const template = target?.runtime.moduleTemplate;
 
+  // Route every LLM call through the journal when one is present (O1). When
+  // watchdog budgets are also set, supervise the call so stalls are killed
+  // (O2/O8); otherwise record-only; otherwise plain generation.
+  const callLLM = (p: string, opts: GenerateOptions, attempt: number): Promise<string> => {
+    if (journal && budgets) {
+      return supervisedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt }, { budgets });
+    }
+    if (journal) {
+      return recordedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt });
+    }
+    return llm.generate(p, opts);
+  };
+
   let code: string;
 
   if (template) {
     // Template mode: LLM fills in sections, we splice into template
-    const raw = await llm.generate(prompt, {
-      system: systemPrompt,
-      temperature: 0.1, // lower temp for more deterministic section filling
-      maxTokens: 8192,
-    });
-
+    const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens: 8192 }, 0);
     code = assembleFromTemplate(template, raw, iu);
   } else {
     // Freeform mode
-    code = cleanCodeResponse(await llm.generate(prompt, {
-      system: systemPrompt,
-      temperature: 0.2,
-      maxTokens: 8192,
-    }));
+    code = cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens: 8192 }, 0));
   }
 
-  // Typecheck-and-retry loop
+  // Typecheck-and-repair loop (O3). A missing/broken typechecker is a hard
+  // failure that fires ZERO repair calls — never mistaken for type errors.
   if (projectRoot && iu.output_files[0]) {
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      const errors = typecheckFile(projectRoot, iu.output_files[0], code);
-      if (!errors) break; // clean!
+    const probe = probeTypechecker(projectRoot);
+    if (!probe.available) {
+      journal?.event('typecheck', { iu: iu.name, status: 'unavailable', detail: probe.detail, repairCalls: 0 });
+      ctx.onProgress?.(iu, 'error', `typecheck tool unavailable: ${probe.detail}`);
+    } else {
+      let prevCount: number | null = null;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        const result = typecheckFile(projectRoot, iu.output_files[0], code, probe);
 
-      // Feed errors back to LLM with the current code
-      const fixPrompt = buildFixPrompt(code, errors);
-      const fixResponse = await llm.generate(fixPrompt, {
-        system: systemPrompt,
-        temperature: 0.1,
-        maxTokens: 8192,
-      });
+        if (result.status === 'clean') {
+          journal?.event('typecheck', { iu: iu.name, status: 'clean', command: result.command, iteration: attempt });
+          break;
+        }
+        if (result.status === 'unavailable') {
+          // Tool vanished mid-loop — stop; never repair on a tool failure (#1).
+          journal?.event('typecheck', { iu: iu.name, status: 'unavailable', detail: result.detail });
+          ctx.onProgress?.(iu, 'error', `typecheck tool unavailable: ${result.detail}`);
+          break;
+        }
 
-      if (template) {
-        code = assembleFromTemplate(template, fixResponse, iu);
-      } else {
-        code = cleanCodeResponse(fixResponse);
+        // status === 'errors' — record the per-iteration error-count delta.
+        const delta = prevCount === null ? null : result.count - prevCount;
+        journal?.event('typecheck', {
+          iu: iu.name, status: 'errors', iteration: attempt,
+          errorCount: result.count, delta, converging: delta === null ? null : delta < 0,
+          command: result.command,
+        });
+        prevCount = result.count;
+
+        if (attempt === MAX_RETRIES) {
+          // Verified, still failing — report the capped loop (O3).
+          journal?.event('repair_capped', { iu: iu.name, remainingErrors: result.count, maxRetries: MAX_RETRIES });
+          break;
+        }
+
+        // Feed errors back to the LLM with the current code.
+        const fixResponse = await callLLM(
+          buildFixPrompt(code, result.errors),
+          { system: systemPrompt, temperature: 0.1, maxTokens: 8192 },
+          attempt + 1,
+        );
+        code = template ? assembleFromTemplate(template, fixResponse, iu) : cleanCodeResponse(fixResponse);
       }
     }
   }
@@ -307,39 +342,27 @@ const MINIMAL_TSCONFIG = JSON.stringify({
 }, null, 2);
 
 /**
- * Typecheck a single file by writing it to disk and running tsc.
- * Returns error output or null if clean.
+ * Typecheck a single file by writing it to disk and running the resolved tsc.
+ * Returns a structured result distinguishing clean / type-errors / tool-
+ * unavailable (the last is never treated as type errors — appendix #1).
  */
-function typecheckFile(projectRoot: string, filePath: string, content: string): string | null {
+function typecheckFile(
+  projectRoot: string,
+  filePath: string,
+  content: string,
+  probe?: ReturnType<typeof probeTypechecker>,
+): TypecheckResult {
   const fullPath = join(projectRoot, filePath);
   mkdirSync(dirname(fullPath), { recursive: true });
   writeFileSync(fullPath, content, 'utf8');
 
   // Ensure tsconfig.json exists for tsc
   const tsconfigPath = join(projectRoot, 'tsconfig.json');
-  const hadTsconfig = existsSync(tsconfigPath);
-  if (!hadTsconfig) {
+  if (!existsSync(tsconfigPath)) {
     writeFileSync(tsconfigPath, MINIMAL_TSCONFIG, 'utf8');
   }
 
-  try {
-    execSync('npx tsc --noEmit 2>&1', {
-      cwd: projectRoot,
-      timeout: 30000,
-      stdio: 'pipe',
-    });
-    return null; // clean
-  } catch (err: unknown) {
-    const execErr = err as { stdout?: Buffer; stderr?: Buffer };
-    const output = (execErr.stdout?.toString() || '') + (execErr.stderr?.toString() || '');
-    // Filter to only errors from this file
-    const fileErrors = output
-      .split('\n')
-      .filter(line => line.includes(filePath))
-      .join('\n')
-      .trim();
-    return fileErrors || output.trim();
-  }
+  return typecheckProject(projectRoot, filePath, probe);
 }
 
 /**

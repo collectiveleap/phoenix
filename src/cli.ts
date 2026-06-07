@@ -23,7 +23,7 @@ import { diffClauses } from './diff.js';
 
 // Phase B
 import { extractCanonicalNodes, extractCandidates } from './canonicalizer.js';
-import { extractCanonicalNodesLLM } from './canonicalizer-llm.js';
+import { extractCanonicalNodesLLM, canonicalize } from './canonicalizer-llm.js';
 import { computeWarmHashes } from './warm-hasher.js';
 import { classifyChanges } from './classifier.js';
 import { classifyChangesWithLLM } from './classifier-llm.js';
@@ -31,7 +31,12 @@ import { DRateTracker } from './d-rate.js';
 import { BootstrapStateMachine } from './bootstrap.js';
 
 // Phase C
-import { planIUs } from './iu-planner.js';
+import { planIUs, analyzePlan } from './iu-planner.js';
+import { loadIUs, saveIUs } from './iu-planner-io.js';
+import { runSupervised, renderRunStatus } from './harness/run.js';
+import { loadPolicy, describePolicy } from './harness/policy.js';
+import { acquireRunLock, AlreadyRunningError } from './harness/lock.js';
+import { RunJournal } from './observe/journal.js';
 import { generateIU, generateAll } from './regen.js';
 import type { RegenContext } from './regen.js';
 import { detectDrift } from './drift.js';
@@ -55,7 +60,11 @@ import { deriveServices, deriveInterfaces, generateScaffold } from './scaffold.j
 import { collectInspectData, renderInspectHTML, serveInspect } from './inspect.js';
 
 // LLM
-import { resolveProvider, describeAvailability } from './llm/resolve.js';
+import { resolveProvider, describeAvailability, resolveProviderInfo, describeResolution } from './llm/resolve.js';
+import { writeScaffoldFiles } from './harness/scaffold-writer.js';
+import type { ScaffoldWriteEntry } from './harness/scaffold-writer.js';
+import { preflight } from './harness/preflight.js';
+import type { PreflightResult } from './harness/preflight.js';
 
 // Architectures
 import { resolveTarget, listArchitectures } from './architectures/index.js';
@@ -103,6 +112,29 @@ function magenta(s: string): string { return `${MAGENTA}${s}${RESET}`; }
 function cyan(s: string): string { return `${CYAN}${s}${RESET}`; }
 function dim(s: string): string { return `${DIM}${s}${RESET}`; }
 function bold(s: string): string { return `${BOLD}${s}${RESET}`; }
+
+/** Print a tracked-scaffold-write report (O7): every file, hand-edits flagged. */
+function printScaffoldReport(report: ScaffoldWriteEntry[]): void {
+  for (const e of report) {
+    switch (e.status) {
+      case 'created':
+        console.log(`    ${green('✔')} ${e.path} ${dim('(created)')}`);
+        break;
+      case 'updated':
+        console.log(`    ${green('✔')} ${e.path} ${dim('(overwritten)')}`);
+        break;
+      case 'unchanged':
+        console.log(`    ${dim('·')} ${dim(`${e.path} (unchanged)`)}`);
+        break;
+      case 'kept-hand-edited':
+        console.log(`    ${yellow('⚠')} ${e.path} ${yellow('(hand-edited — kept; rerun with --force-scaffold to regenerate)')}`);
+        break;
+      case 'overwritten-hand-edited':
+        console.log(`    ${yellow('⚠')} ${e.path} ${yellow('(hand-edited — overwritten)')}`);
+        break;
+    }
+  }
+}
 
 function severityColor(severity: string): string {
   switch (severity) {
@@ -156,18 +188,6 @@ function loadBootstrapState(phoenixDir: string): BootstrapStateMachine {
 
 function saveBootstrapState(phoenixDir: string, machine: BootstrapStateMachine): void {
   writeFileSync(join(phoenixDir, 'state.json'), JSON.stringify(machine.toJSON(), null, 2), 'utf8');
-}
-
-function loadIUs(phoenixDir: string): ImplementationUnit[] {
-  const iuPath = join(phoenixDir, 'graphs', 'ius.json');
-  if (!existsSync(iuPath)) return [];
-  return JSON.parse(readFileSync(iuPath, 'utf8'));
-}
-
-function saveIUs(phoenixDir: string, ius: ImplementationUnit[]): void {
-  const dir = join(phoenixDir, 'graphs');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'ius.json'), JSON.stringify(ius, null, 2), 'utf8');
 }
 
 function loadDRateTracker(phoenixDir: string): DRateTracker {
@@ -322,11 +342,11 @@ async function cmdBootstrap(): Promise<void> {
   console.log();
 
   // Step 2: Canonicalization
+  const llmInfo = resolveProviderInfo(phoenixDir);
   const llmEarly = resolveProvider(phoenixDir);
-  if (llmEarly) {
-    console.log(`  ${dim('Phase B:')} Canonicalization + warm context hashing ${dim(`(LLM: ${llmEarly.name}/${llmEarly.model})`)}`);
-  } else {
-    console.log(`  ${dim('Phase B:')} Canonicalization + warm context hashing ${dim('(rule-based)')}`);
+  console.log(`  ${dim('Phase B:')} Canonicalization + warm context hashing`);
+  for (const line of describeResolution(llmInfo)) {
+    console.log(`    ${line.startsWith('⚠') ? yellow(line) : dim(line)}`);
   }
 
   // Collect all clauses
@@ -336,10 +356,17 @@ async function cmdBootstrap(): Promise<void> {
     allClauses.push(...specStore.getClauses(docId));
   }
 
-  // Extract canonical nodes (LLM-enhanced when available)
-  const canonNodes = await extractCanonicalNodesLLM(allClauses, llmEarly);
+  // Extract canonical nodes (LLM-enhanced when available). Report the mode
+  // that ACTUALLY ran — never label rule-based as LLM (O4 / appendix #8).
+  const canon = await canonicalize(allClauses, llmEarly);
+  const canonNodes = canon.nodes;
   canonStore.saveNodes(canonNodes);
-  console.log(`    ${green('✔')} ${canonNodes.length} canonical nodes extracted`);
+  if (canon.stats.mode === 'llm-normalized') {
+    console.log(`    ${green('✔')} ${canonNodes.length} canonical nodes (LLM-normalized: ${canon.stats.llmNodeCount}/${canonNodes.length} via ${llmEarly?.name}/${llmEarly?.model}, ${canon.stats.ruleNodeCount} rule-based)`);
+  } else {
+    const why = canon.stats.fellBackToRules ? ' (LLM unavailable mid-run — fell back)' : (llmEarly ? ' (LLM produced no nodes — rule-based)' : '');
+    console.log(`    ${green('✔')} ${canonNodes.length} canonical nodes (rule-based)${dim(why)}`);
+  }
 
   // Compute warm hashes
   const warmHashes = computeWarmHashes(allClauses, canonNodes);
@@ -449,15 +476,12 @@ async function cmdBootstrap(): Promise<void> {
   const services = deriveServices(ius);
   const projectName = basename(projectRoot);
   const scaffold = generateScaffold(services, projectName, arch, interfaces);
-  for (const [filePath, content] of scaffold.files) {
-    const fullPath = join(projectRoot, filePath);
-    mkdirSync(join(fullPath, '..'), { recursive: true });
-    writeFileSync(fullPath, content, 'utf8');
-  }
+  // Tracked write: every file is reported; hand-edits are preserved (O7).
+  const scaffoldReport = writeScaffoldFiles(projectRoot, phoenixDir, scaffold.files);
+  printScaffoldReport(scaffoldReport);
   for (const svc of services) {
     console.log(`    ${green('✔')} ${svc.name} → :${svc.port} (${svc.modules.length} modules)`);
   }
-  console.log(`    ${green('✔')} package.json, tsconfig.json`);
   console.log();
 
   // Save state
@@ -998,22 +1022,30 @@ function cmdPlan(): void {
   const ius = planIUs(canonNodes, allClauses);
   saveIUs(phoenixDir, ius);
 
+  // Inspect the plan BEFORE any generation (O5/O10).
+  const report = analyzePlan(ius, canonNodes, allClauses);
+  const reportByIu = new Map(report.modules.map(m => [m.iu_id, m]));
+
   console.log(bold('📦 IU Plan'));
   console.log();
   console.log(`  ${green(`${ius.length} Implementation Units planned`)}`);
   console.log();
 
   for (const iu of ius) {
+    const m = reportByIu.get(iu.iu_id);
     const riskColor = iu.risk_tier === 'critical' ? red
       : iu.risk_tier === 'high' ? yellow
       : iu.risk_tier === 'medium' ? cyan
       : green;
-    console.log(`  ${bold(iu.name)}`);
+    console.log(`  ${bold(iu.name)}${m?.oversized ? ` ${yellow('⚠ OVERSIZED')}` : ''}`);
     console.log(`    ${dim('ID:')}       ${iu.iu_id.slice(0, 12)}…`);
     console.log(`    ${dim('Risk:')}     ${riskColor(iu.risk_tier)}`);
-    console.log(`    ${dim('Kind:')}     ${iu.kind}`);
-    console.log(`    ${dim('Sources:')}  ${iu.source_canon_ids.length} canonical nodes`);
+    console.log(`    ${dim('Kind:')}     ${iu.kind}${m ? ` ${dim('·')} role: ${m.role}` : ''}`);
+    console.log(`    ${dim('Sources:')}  ${iu.source_canon_ids.length} canonical nodes${m ? dim(` (~${m.estimate.approxTokens} tok est.)`) : ''}`);
     console.log(`    ${dim('Output:')}   ${iu.output_files.join(', ')}`);
+    if (m && m.headings.length > 0) {
+      console.log(`    ${dim('Headings:')} ${m.headings.join(', ')}`);
+    }
     console.log(`    ${dim('Evidence:')} ${iu.evidence_policy.required.join(', ')}`);
     if (iu.contract.invariants.length > 0) {
       console.log(`    ${dim('Invariants:')}`);
@@ -1021,6 +1053,19 @@ function cmdPlan(): void {
         console.log(`      ${dim('·')} ${inv.slice(0, 80)}`);
       }
     }
+    console.log();
+  }
+
+  // Heading → module mapping (makes one-module-per-heading fragmentation
+  // visible before generating — appendix #5).
+  console.log(`  ${bold('Heading → Module')}`);
+  for (const { heading, module } of report.headingToModule) {
+    console.log(`    ${dim(heading)} ${dim('→')} ${module}`);
+  }
+  console.log();
+
+  if (report.oversizedCount > 0) {
+    console.log(`  ${yellow(`⚠ ${report.oversizedCount} module(s) exceed ${report.sizeThreshold} source nodes — generation risk. Consider splitting the spec section.`)}`);
     console.log();
   }
 }
@@ -1052,7 +1097,9 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   console.log(bold('⚡ Code Regeneration'));
   if (llm) {
-    console.log(`  ${dim(`Provider: ${llm.name}/${llm.model}`)}`);
+    for (const line of describeResolution(resolveProviderInfo(phoenixDir))) {
+      console.log(`  ${line.startsWith('⚠') ? yellow(line) : dim(line)}`);
+    }
   } else {
     const { hint } = describeAvailability();
     console.log(`  ${dim('Mode: stubs')}${forceStubs ? '' : ` ${dim('—')} ${dim(hint)}`}`);
@@ -1110,14 +1157,157 @@ async function cmdRegen(args: string[]): Promise<void> {
   const allInterfaces = deriveInterfaces(allIUs, canonNodes);
   const services = deriveServices(allIUs);
   const scaffold = generateScaffold(services, basename(projectRoot), regenArch, allInterfaces);
-  for (const [filePath, content] of scaffold.files) {
-    const fullPath = join(projectRoot, filePath);
-    mkdirSync(join(fullPath, '..'), { recursive: true });
-    writeFileSync(fullPath, content, 'utf8');
-  }
+  const forceScaffold = args.includes('--force-scaffold');
+  const scaffoldReport = writeScaffoldFiles(projectRoot, phoenixDir, scaffold.files, { force: forceScaffold });
+  printScaffoldReport(scaffoldReport);
 
   console.log();
   console.log(`  ${dim(`${results.length} IU(s) regenerated. Scaffold updated.`)}`);
+}
+
+/** Print a preflight report (O9): pass/fail per assumption with remediation. */
+function printPreflight(result: PreflightResult): void {
+  console.log(bold('🚦 Preflight'));
+  for (const c of result.checks) {
+    const mark = c.ok ? green('✔') : red('✖');
+    console.log(`  ${mark} ${c.name}: ${c.ok ? dim(c.detail) : c.detail}`);
+    if (!c.ok && c.remediation) console.log(`      ${yellow('→')} ${yellow(c.remediation)}`);
+  }
+  console.log();
+  console.log(result.ok ? green('  All preflight checks passed.') : red('  Preflight failed — fix the above before running.'));
+}
+
+function cmdPreflight(args: string[]): void {
+  const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  const result = preflight({
+    projectRoot,
+    phoenixDir,
+    requireProvider: !args.includes('--no-provider'),
+    requireNativeBuild: args.includes('--native'),
+  });
+  printPreflight(result);
+  if (!result.ok) process.exitCode = 1;
+}
+
+/**
+ * Unattended supervised run: spec → running, verified app (O15/O16).
+ * Preflight-gates, then runs the pipeline under lock/journal/watchdog/policy.
+ */
+async function cmdRun(args: string[]): Promise<void> {
+  const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  const dryRun = args.includes('--dry-run');
+  const noResume = args.includes('--no-resume');
+  const forceScaffold = args.includes('--force-scaffold');
+  const runtimeChecks = args.includes('--runtime-checks');
+  const policy = loadPolicy(phoenixDir);
+
+  console.log(bold('🚀 Phoenix Run'));
+  console.log();
+
+  // Resolve architecture (same as bootstrap).
+  let arch: ResolvedTarget | null = null;
+  const configPath = join(phoenixDir, 'config.json');
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (config.architecture) arch = resolveTarget(config.architecture);
+    } catch { /* ignore */ }
+  }
+
+  // Preflight (O9) — abort fast with a fix list.
+  const pf = preflight({
+    projectRoot,
+    phoenixDir,
+    requireProvider: true,
+    requireNativeBuild: !!arch,
+  });
+  printPreflight(pf);
+  console.log();
+  if (!pf.ok && !dryRun) {
+    console.log(red('✖ Preflight failed — aborting before any generation.'));
+    process.exitCode = 1;
+    return;
+  }
+
+  if (dryRun) {
+    console.log(bold('📋 Policy (dry-run)'));
+    for (const line of describePolicy(policy)) console.log(`  ${dim(line)}`);
+    console.log();
+    return;
+  }
+
+  // Ingest specs so the pipeline has fresh clauses.
+  const specStore = new SpecStore(phoenixDir);
+  const specFiles = findSpecFiles(projectRoot);
+  for (const f of specFiles) specStore.ingestDocument(f, projectRoot);
+  const clauses: Clause[] = [];
+  for (const f of specFiles) clauses.push(...specStore.getClauses(relative(projectRoot, f)));
+
+  const llm = resolveProvider(phoenixDir);
+
+  let result;
+  try {
+    result = await runSupervised({
+      projectRoot, phoenixDir, clauses, arch, llm, policy,
+      resume: !noResume,
+      forceScaffold,
+      runtimeChecks,
+      log: (msg) => console.log(`  ${dim(msg)}`),
+    });
+  } catch (err) {
+    if (err instanceof AlreadyRunningError) {
+      console.log(red(`✖ ${err.message}`));
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  console.log();
+  if (result.ok) {
+    console.log(green(`✔ Run ${result.runId} complete — app verified.`));
+  } else {
+    console.log(red(`✖ Run ${result.runId} not done${result.failedStage ? ` (failed: ${result.failedStage})` : ''}${result.error ? ` — ${result.error}` : ''}.`));
+    process.exitCode = 1;
+  }
+}
+
+/** Inspect persisted runs (O15: answer the three questions post-hoc). */
+function cmdRuns(args: string[]): void {
+  const { phoenixDir } = requirePhoenixRoot();
+  const wanted = args.find(a => !a.startsWith('-'));
+  const runIds = RunJournal.listRuns(phoenixDir);
+  if (runIds.length === 0) {
+    console.log(yellow('⚠ No runs recorded yet. Run `phoenix run`.'));
+    return;
+  }
+
+  if (!wanted) {
+    console.log(bold('🗂  Runs'));
+    for (const id of runIds.slice(0, 20)) {
+      const snap = RunJournal.readState(phoenixDir, id);
+      const outcome = snap?.outcome ?? (snap?.endedAt ? 'done' : 'in-progress');
+      console.log(`  ${id} ${dim(`· ${outcome} · ${snap?.calls.length ?? 0} calls`)}`);
+    }
+    console.log();
+    console.log(dim('  phoenix runs <runId> for details'));
+    return;
+  }
+
+  const snap = RunJournal.readState(phoenixDir, wanted);
+  if (!snap) {
+    console.log(red(`✖ No such run: ${wanted}`));
+    process.exitCode = 1;
+    return;
+  }
+  console.log(bold(`🗂  Run ${snap.runId}`));
+  for (const line of renderRunStatus(snap)) console.log(`  ${line}`);
+  console.log();
+  console.log(bold('  Stages'));
+  for (const s of snap.stages) {
+    const dur = s.endedAt ? `${Math.round((s.endedAt - s.startedAt) / 1000)}s` : 'running';
+    console.log(`    ${s.outcome === 'failed' ? red('✖') : green('✔')} ${s.name} ${dim(`(${dur})`)}`);
+  }
 }
 
 function cmdDrift(): void {
@@ -1187,15 +1377,19 @@ async function cmdCanonicalize(): Promise<void> {
 
   const llm = resolveProvider(phoenixDir);
   console.log(bold('📐 Canonicalization'));
-  if (llm) {
-    console.log(`  ${dim(`LLM: ${llm.name}/${llm.model}`)}`);
+  for (const line of describeResolution(resolveProviderInfo(phoenixDir))) {
+    console.log(`  ${line.startsWith('⚠') ? yellow(line) : dim(line)}`);
   }
   console.log();
 
-  const canonNodes = await extractCanonicalNodesLLM(allClauses, llm);
+  const canon = await canonicalize(allClauses, llm);
+  const canonNodes = canon.nodes;
   canonStore.saveNodes(canonNodes);
 
-  console.log(`  ${green('✔')} ${canonNodes.length} canonical nodes extracted from ${allClauses.length} clauses`);
+  const modeLabel = canon.stats.mode === 'llm-normalized'
+    ? `LLM-normalized ${canon.stats.llmNodeCount}/${canonNodes.length}`
+    : 'rule-based';
+  console.log(`  ${green('✔')} ${canonNodes.length} canonical nodes extracted from ${allClauses.length} clauses (${modeLabel})`);
 
   const byType = new Map<string, number>();
   for (const node of canonNodes) {
@@ -1534,6 +1728,11 @@ ${bold('Usage:')} phoenix <command> [options]
 ${bold('Getting Started:')}
   ${cyan('init')}                 Initialize a new Phoenix project
   ${cyan('bootstrap')}            Full bootstrap: ingest → canonicalize → plan → generate
+  ${cyan('run')}                  Unattended supervised run (journal, watchdog, acceptance gate)
+                         ${dim('--dry-run  Print preflight + policy without generating')}
+                         ${dim('--no-resume / --force-scaffold / --runtime-checks')}
+  ${cyan('preflight')}            Verify the toolchain before a run (O9)
+  ${cyan('runs')} [runId]         Inspect supervised run journals (O15)
 
 ${bold('Spec Management:')}
   ${cyan('ingest')} [files...]     Ingest spec documents (default: all in spec/)
@@ -1605,6 +1804,15 @@ async function main(): Promise<void> {
       break;
     case 'plan':
       cmdPlan();
+      break;
+    case 'preflight':
+      cmdPreflight(commandArgs);
+      break;
+    case 'run':
+      await cmdRun(commandArgs);
+      break;
+    case 'runs':
+      cmdRuns(commandArgs);
       break;
     case 'regen':
     case 'regenerate':

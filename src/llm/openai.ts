@@ -5,7 +5,8 @@
  * Requires OPENAI_API_KEY env var.
  */
 
-import type { LLMProvider, GenerateOptions } from './provider.js';
+import type { LLMProvider, GenerateOptions, StreamHooks } from './provider.js';
+import { sseData } from './sse.js';
 
 const API_URL = 'https://api.openai.com/v1/chat/completions';
 
@@ -20,6 +21,10 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async generate(prompt: string, options?: GenerateOptions): Promise<string> {
+    return this.generateStream(prompt, options);
+  }
+
+  async generateStream(prompt: string, options?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
     const messages: Array<{ role: string; content: string }> = [];
 
     if (options?.system) {
@@ -31,6 +36,7 @@ export class OpenAIProvider implements LLMProvider {
       model: this.model,
       messages,
       max_tokens: options?.maxTokens ?? 8192,
+      stream: true,
     };
 
     if (options?.temperature !== undefined) {
@@ -44,6 +50,7 @@ export class OpenAIProvider implements LLMProvider {
         'Authorization': `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
 
     if (!res.ok) {
@@ -51,14 +58,33 @@ export class OpenAIProvider implements LLMProvider {
       throw new Error(`OpenAI API error ${res.status}: ${text}`);
     }
 
-    const data = await res.json() as {
-      choices: Array<{ message: { content: string } }>;
-    };
+    let out = '';
+    let bytes = 0;
+    let firstByteSeen = false;
 
-    if (!data.choices?.length) {
-      throw new Error('OpenAI returned no choices');
+    for await (const data of sseData(res.body)) {
+      if (data === '[DONE]') break;
+      let ev: { choices?: Array<{ delta?: { content?: string } }> };
+      try {
+        ev = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const text = ev.choices?.[0]?.delta?.content ?? '';
+      if (text.length === 0) continue;
+      if (!firstByteSeen) {
+        firstByteSeen = true;
+        hooks?.onFirstByte?.();
+      }
+      out += text;
+      bytes += Buffer.byteLength(text, 'utf8');
+      hooks?.onChunk?.(bytes, text);
     }
+    hooks?.onStreamEnd?.();
 
-    return data.choices[0].message.content;
+    if (out.length === 0) {
+      throw new Error('OpenAI returned no text content');
+    }
+    return out;
   }
 }

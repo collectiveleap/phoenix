@@ -15,9 +15,29 @@ export interface LLMProvider {
 
   /**
    * Generate a completion from a prompt.
-   * Returns the raw text response.
+   * Returns the raw text response. Thin wrapper over generateStream.
    */
   generate(prompt: string, options?: GenerateOptions): Promise<string>;
+
+  /**
+   * Generate a completion, emitting lifecycle hooks as bytes arrive so the
+   * caller can observe time-to-first-byte and stream liveness (PRD O1/O2).
+   * Returns the full text once the stream ends.
+   */
+  generateStream(prompt: string, options?: GenerateOptions, hooks?: StreamHooks): Promise<string>;
+}
+
+/**
+ * Lifecycle callbacks fired during a streaming generation. All optional;
+ * providers fire what they can. Bytes are cumulative UTF-8 byte counts.
+ */
+export interface StreamHooks {
+  /** First byte of the response has arrived. */
+  onFirstByte?: () => void;
+  /** A chunk arrived. `totalBytes` is cumulative; `deltaText` is the new text. */
+  onChunk?: (totalBytes: number, deltaText: string) => void;
+  /** The provider's output stream has ended (before final resolution). */
+  onStreamEnd?: () => void;
 }
 
 export interface GenerateOptions {
@@ -27,6 +47,8 @@ export interface GenerateOptions {
   temperature?: number;
   /** System prompt / role. */
   system?: string;
+  /** Abort signal — the watchdog uses this to kill a stalled call. */
+  signal?: AbortSignal;
 }
 
 export interface LLMConfig {

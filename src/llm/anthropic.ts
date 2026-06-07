@@ -5,7 +5,8 @@
  * Requires ANTHROPIC_API_KEY env var.
  */
 
-import type { LLMProvider, GenerateOptions } from './provider.js';
+import type { LLMProvider, GenerateOptions, StreamHooks } from './provider.js';
+import { sseData } from './sse.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_VERSION = '2023-06-01';
@@ -21,10 +22,15 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   async generate(prompt: string, options?: GenerateOptions): Promise<string> {
+    return this.generateStream(prompt, options);
+  }
+
+  async generateStream(prompt: string, options?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
     const body: Record<string, unknown> = {
       model: this.model,
       max_tokens: options?.maxTokens ?? 8192,
       messages: [{ role: 'user', content: prompt }],
+      stream: true,
     };
 
     if (options?.system) {
@@ -42,6 +48,7 @@ export class AnthropicProvider implements LLMProvider {
         'anthropic-version': API_VERSION,
       },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
 
     if (!res.ok) {
@@ -49,15 +56,35 @@ export class AnthropicProvider implements LLMProvider {
       throw new Error(`Anthropic API error ${res.status}: ${text}`);
     }
 
-    const data = await res.json() as {
-      content: Array<{ type: string; text: string }>;
-    };
+    let out = '';
+    let bytes = 0;
+    let firstByteSeen = false;
 
-    const textBlocks = data.content.filter(b => b.type === 'text');
-    if (textBlocks.length === 0) {
+    for await (const data of sseData(res.body)) {
+      if (data === '[DONE]') break;
+      let ev: { type?: string; delta?: { type?: string; text?: string } };
+      try {
+        ev = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
+        const text = ev.delta.text ?? '';
+        if (text.length === 0) continue;
+        if (!firstByteSeen) {
+          firstByteSeen = true;
+          hooks?.onFirstByte?.();
+        }
+        out += text;
+        bytes += Buffer.byteLength(text, 'utf8');
+        hooks?.onChunk?.(bytes, text);
+      }
+    }
+    hooks?.onStreamEnd?.();
+
+    if (out.length === 0) {
       throw new Error('Anthropic returned no text content');
     }
-
-    return textBlocks.map(b => b.text).join('');
+    return out;
   }
 }

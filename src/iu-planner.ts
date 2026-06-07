@@ -17,6 +17,7 @@ import type { Clause } from './models/clause.js';
 import type { ImplementationUnit } from './models/iu.js';
 import { defaultBoundaryPolicy, defaultEnforcement } from './models/iu.js';
 import { sha256 } from './semhash.js';
+import { deriveInterfaces } from './scaffold.js';
 
 /**
  * Plan IUs from canonical nodes, grouping by source document + section.
@@ -137,6 +138,103 @@ export function planIUs(
   ius.sort((a, b) => a.output_files[0].localeCompare(b.output_files[0]));
 
   return ius;
+}
+
+// ─── Plan inspection (O5/O10, appendix #5) ──────────────────────────────────
+
+/** Default node-count above which a module is flagged a generation risk. */
+export const DEFAULT_IU_SIZE_THRESHOLD = 12;
+
+export interface PlanModuleReport {
+  iu_id: string;
+  name: string;
+  outputPath: string;
+  role: 'api' | 'web-ui';
+  sourceNodeCount: number;
+  /** Source headings (doc › section) that fed this module. */
+  headings: string[];
+  oversized: boolean;
+  /** Up-front cost estimate so risk is visible before generation. */
+  estimate: { nodes: number; approxTokens: number };
+}
+
+export interface PlanReport {
+  modules: PlanModuleReport[];
+  /** Flattened heading→module mapping — makes fragmentation visible. */
+  headingToModule: { heading: string; module: string }[];
+  sizeThreshold: number;
+  oversizedCount: number;
+}
+
+export interface PlanReportOptions {
+  /** Node-count threshold for the oversize flag. */
+  sizeThreshold?: number;
+}
+
+/** Rough generation-size proxy: ~150 tokens of output per source node. */
+function approxTokensFor(nodeCount: number): number {
+  return nodeCount * 150;
+}
+
+/**
+ * Analyze a plan for inspection BEFORE generation (O5): per-module name, path,
+ * role, source-node count, the heading→module mapping, and an oversize flag
+ * with an estimate (O10). Pure — does not generate or write anything.
+ */
+export function analyzePlan(
+  ius: ImplementationUnit[],
+  canonNodes: CanonicalNode[],
+  clauses: Clause[],
+  opts?: PlanReportOptions,
+): PlanReport {
+  const threshold = opts?.sizeThreshold ?? DEFAULT_IU_SIZE_THRESHOLD;
+  const nodeById = new Map(canonNodes.map(n => [n.canon_id, n]));
+  const clauseById = new Map(clauses.map(c => [c.clause_id, c]));
+  const roleByIuId = new Map(deriveInterfaces(ius, canonNodes).map(e => [e.iu_id, e.role]));
+
+  const headingFor = (clause: Clause): string => {
+    const doc = clause.source_doc_id;
+    const section = clause.section_path.length > 1
+      ? clause.section_path.slice(1).join(' › ')
+      : (clause.section_path[0] ?? 'main');
+    return `${doc} › ${section}`;
+  };
+
+  const modules: PlanModuleReport[] = [];
+  const headingToModule: { heading: string; module: string }[] = [];
+
+  for (const iu of ius) {
+    const headings = new Set<string>();
+    for (const canonId of iu.source_canon_ids) {
+      const node = nodeById.get(canonId);
+      if (!node) continue;
+      for (const clauseId of node.source_clause_ids) {
+        const clause = clauseById.get(clauseId);
+        if (clause) headings.add(headingFor(clause));
+      }
+    }
+    const nodeCount = iu.source_canon_ids.length;
+    const sortedHeadings = [...headings].sort();
+    for (const h of sortedHeadings) headingToModule.push({ heading: h, module: iu.name });
+
+    modules.push({
+      iu_id: iu.iu_id,
+      name: iu.name,
+      outputPath: iu.output_files[0] ?? '',
+      role: roleByIuId.get(iu.iu_id) ?? 'api',
+      sourceNodeCount: nodeCount,
+      headings: sortedHeadings,
+      oversized: nodeCount > threshold,
+      estimate: { nodes: nodeCount, approxTokens: approxTokensFor(nodeCount) },
+    });
+  }
+
+  return {
+    modules,
+    headingToModule: headingToModule.sort((a, b) => a.heading.localeCompare(b.heading)),
+    sizeThreshold: threshold,
+    oversizedCount: modules.filter(m => m.oversized).length,
+  };
 }
 
 /**
