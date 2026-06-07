@@ -51,6 +51,12 @@ export interface RegenContext {
   journal?: RunJournal;
   /** Watchdog stall budgets — when present (with a journal), calls are supervised (O2/O8). */
   budgets?: HealthBudgets;
+  /** Max generation retries on a hard call failure (e.g. the startup hang). Default 0. */
+  maxRetries?: number;
+  /** Max typecheck-repair iterations before reporting a capped loop. Default 2. */
+  maxRepairs?: number;
+  /** Backoff between generation retries, in ms (× attempt). Default 0. */
+  backoffMs?: number;
   /** Callback for progress reporting. */
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
 }
@@ -129,7 +135,10 @@ export async function generateAll(ius: ImplementationUnit[], ctx?: RegenContext)
 
 // ─── LLM Generation ─────────────────────────────────────────────────────────
 
+/** Default typecheck-repair iteration cap when `ctx.maxRepairs` is unset. */
 const MAX_RETRIES = 2;
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
  * Generate code for an IU using an LLM provider.
@@ -172,15 +181,36 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
     return llm.generate(p, opts);
   };
 
-  let code: string;
+  // Generation retry (B6): a hard call failure — notably the known intermittent
+  // startup hang (#45269) — is ridden out by retrying the generation call up to
+  // `maxRetries` times with backoff, rather than dropping to a stub on the first
+  // miss. Reliability of the call is the harness's job, not the user's.
+  const maxRetries = ctx.maxRetries ?? 0;
+  const backoffMs = ctx.backoffMs ?? 0;
 
-  if (template) {
-    // Template mode: LLM fills in sections, we splice into template
-    const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens: 8192 }, 0);
-    code = assembleFromTemplate(template, raw, iu);
-  } else {
-    // Freeform mode
-    code = cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens: 8192 }, 0));
+  const generateOnce = async (): Promise<string> => {
+    if (template) {
+      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens: 8192 }, 0);
+      return assembleFromTemplate(template, raw, iu);
+    }
+    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens: 8192 }, 0));
+  };
+
+  let code: string;
+  for (let genAttempt = 0; ; genAttempt++) {
+    try {
+      code = await generateOnce();
+      break;
+    } catch (err) {
+      if (genAttempt >= maxRetries) throw err;
+      journal?.event('generate_retry', {
+        iu: iu.name,
+        attempt: genAttempt + 1,
+        of: maxRetries,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (backoffMs > 0) await sleep(backoffMs * (genAttempt + 1));
+    }
   }
 
   // Typecheck-and-repair loop (O3). A missing/broken typechecker is a hard
@@ -191,8 +221,9 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       journal?.event('typecheck', { iu: iu.name, status: 'unavailable', detail: probe.detail, repairCalls: 0 });
       ctx.onProgress?.(iu, 'error', `typecheck tool unavailable: ${probe.detail}`);
     } else {
+      const maxRepairs = ctx.maxRepairs ?? MAX_RETRIES;
       let prevCount: number | null = null;
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      for (let attempt = 0; attempt <= maxRepairs; attempt++) {
         const result = typecheckFile(projectRoot, iu.output_files[0], code, probe);
 
         if (result.status === 'clean') {
@@ -215,9 +246,9 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
         });
         prevCount = result.count;
 
-        if (attempt === MAX_RETRIES) {
+        if (attempt === maxRepairs) {
           // Verified, still failing — report the capped loop (O3).
-          journal?.event('repair_capped', { iu: iu.name, remainingErrors: result.count, maxRetries: MAX_RETRIES });
+          journal?.event('repair_capped', { iu: iu.name, remainingErrors: result.count, maxRepairs });
           break;
         }
 

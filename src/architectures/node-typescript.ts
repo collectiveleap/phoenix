@@ -220,6 +220,12 @@ export const nodeTypescript: RuntimeTarget = {
   description: 'Node.js + TypeScript — Hono, better-sqlite3, Zod',
   language: 'typescript',
 
+  // Surface (not change) this target's existing requirements: better-sqlite3
+  // is a native module needing a C toolchain, and the stack already floors at
+  // Node 20 (better-sqlite3 ^11, @types/node ^22).
+  minNodeMajor: 20,
+  nativeDeps: ['better-sqlite3'],
+
   packages: {
     'hono': '^4.6.0',
     '@hono/node-server': '^1.13.0',

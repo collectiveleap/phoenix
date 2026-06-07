@@ -208,11 +208,32 @@ export function generateScaffold(
   files.set('src/generated/index.ts', generateRootIndex(services));
 
   // Project config
-  files.set('package.json', generatePackageJson(services, projectName, target));
-  files.set('tsconfig.json', generateTsConfig());
+  for (const [path, content] of generateProjectConfig(services, projectName, target)) {
+    files.set(path, content);
+  }
   files.set('vitest.config.ts', generateVitestConfig());
 
   return { files };
+}
+
+/**
+ * The project-level config files only (`package.json` + `tsconfig.json`).
+ *
+ * Phoenix writes these *before* generation (the provision stage) so that
+ * `<pm> install` can run and per-module typecheck can resolve dependencies.
+ * The later full scaffold emits the identical content, so it reports them
+ * `unchanged` rather than as a hand edit. Same generators as `generateScaffold`
+ * — single source of truth.
+ */
+export function generateProjectConfig(
+  services: ServiceDescriptor[],
+  projectName: string = 'phoenix-project',
+  target?: ResolvedTarget | null,
+): Map<string, string> {
+  return new Map([
+    ['package.json', generatePackageJson(services, projectName, target)],
+    ['tsconfig.json', generateTsConfig()],
+  ]);
 }
 
 /**
@@ -874,6 +895,12 @@ function generatePackageJson(
     const rt = target.runtime;
     pkg.dependencies = rt.packages;
     pkg.devDependencies = rt.devPackages;
+    // Allow declared native deps to run their install/build scripts. pnpm blocks
+    // build scripts by default; listing them here lets a plain install compile
+    // the native binding instead of leaving an opaque "bindings file" error (B2).
+    if (rt.nativeDeps && rt.nativeDeps.length > 0) {
+      pkg.pnpm = { onlyBuiltDependencies: [...rt.nativeDeps] };
+    }
   } else {
     pkg.devDependencies = {
       typescript: '^5.4.0',
@@ -891,7 +918,11 @@ function generateTsConfig(): string {
       target: 'ES2022',
       module: 'ESNext',
       moduleResolution: 'bundler',
-      declaration: true,
+      // A generated app is run, not published — no .d.ts emit. Leaving
+      // declaration on forces tsc to name third-party namespace types in the
+      // emitted declarations (e.g. better-sqlite3's default-import Database),
+      // raising TS4023 on otherwise-valid shared files.
+      declaration: false,
       outDir: 'dist',
       rootDir: 'src',
       strict: true,

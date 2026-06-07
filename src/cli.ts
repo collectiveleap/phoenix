@@ -1199,6 +1199,7 @@ async function cmdRun(args: string[]): Promise<void> {
   const noResume = args.includes('--no-resume');
   const forceScaffold = args.includes('--force-scaffold');
   const runtimeChecks = args.includes('--runtime-checks');
+  const install = !args.includes('--no-install');
   const policy = loadPolicy(phoenixDir);
 
   console.log(bold('🚀 Phoenix Run'));
@@ -1214,12 +1215,19 @@ async function cmdRun(args: string[]): Promise<void> {
     } catch { /* ignore */ }
   }
 
-  // Preflight (O9) — abort fast with a fix list.
+  // Preflight (O9) — abort fast with a fix list. Runtime/native requirements
+  // come from the selected architecture's declared contract (A1/A4), not from
+  // "is any arch selected": only require a C toolchain when the arch declares a
+  // native dependency.
   const pf = preflight({
     projectRoot,
     phoenixDir,
     requireProvider: true,
-    requireNativeBuild: !!arch,
+    minNodeMajor: arch?.runtime.minNodeMajor,
+    requireNativeBuild: (arch?.runtime.nativeDeps?.length ?? 0) > 0,
+    // The typechecker (typescript) is installed by the provision stage, so a
+    // not-yet-installed tsc must not block a fresh regenerate-from-scratch run.
+    typecheckerProvisioned: install && !!arch?.runtime.devPackages?.['typescript'],
   });
   printPreflight(pf);
   console.log();
@@ -1252,6 +1260,7 @@ async function cmdRun(args: string[]): Promise<void> {
       resume: !noResume,
       forceScaffold,
       runtimeChecks,
+      install,
       log: (msg) => console.log(`  ${dim(msg)}`),
     });
   } catch (err) {

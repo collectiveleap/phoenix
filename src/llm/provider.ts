@@ -54,6 +54,8 @@ export interface GenerateOptions {
 export interface LLMConfig {
   provider: string;
   model: string;
+  /** Override path to the `claude` CLI binary (for non-standard installs). */
+  claudeCliPath?: string;
 }
 
 /** Default models per provider. */

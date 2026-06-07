@@ -46,6 +46,18 @@ export interface RuntimeTarget {
   /** Language: 'typescript', 'python', 'go', etc. */
   language: string;
 
+  /**
+   * Minimum runtime major version this target needs (e.g. 22 for Node 22).
+   * Surfaced so preflight can verify it; absent ⇒ preflight uses its default.
+   */
+  minNodeMajor?: number;
+  /**
+   * Which of `packages` need a C toolchain to build (e.g. ['better-sqlite3']).
+   * Drives whether the environment contract requires a compiler and whether
+   * Phoenix runs a native build step. Absent/empty ⇒ no native deps.
+   */
+  nativeDeps?: string[];
+
   /** Production dependencies: package name → version range */
   packages: Record<string, string>;
   /** Dev dependencies */

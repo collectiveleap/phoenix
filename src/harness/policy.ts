@@ -31,7 +31,9 @@ export interface RunPolicy {
 export const DEFAULT_POLICY: RunPolicy = {
   budgets: { ...DEFAULT_BUDGETS },
   maxRepairs: 2,
-  maxRetries: 1,
+  // High enough to ride out the known intermittent startup hang (#45269) — the
+  // user never trims the spec to dodge a flaky call (B6).
+  maxRetries: 3,
   backoffMs: 2_000,
   sizeThreshold: DEFAULT_IU_SIZE_THRESHOLD,
   onModuleFailure: 'skip',

@@ -41,7 +41,7 @@ export function resolveProvider(phoenixDir?: string): LLMProvider | null {
   const model = envModel || config.llm?.model || DEFAULT_MODELS[providerName] || DEFAULT_MODELS.anthropic;
 
   // 4. Build provider
-  const provider = buildProvider(providerName, model);
+  const provider = buildProvider(providerName, model, config.llm?.claudeCliPath);
   if (!provider) return null;
 
   // 5. Save preference if we detected it (and have a phoenix dir)
@@ -124,7 +124,7 @@ export function resolveProviderInfo(phoenixDir?: string): ProviderResolution {
     conflicts.push(`Multiple providers available (${available.join(', ')}); defaulting to '${name}'. Set PHOENIX_LLM_PROVIDER to choose explicitly.`);
   }
 
-  const provider = name ? buildProvider(name, model!) : null;
+  const provider = name ? buildProvider(name, model!, config.llm?.claudeCliPath) : null;
   return { provider, name, model, providerSource, modelSource, available, conflicts };
 }
 
@@ -143,7 +143,7 @@ export function describeResolution(info: ProviderResolution): string[] {
 /**
  * Build a provider instance.
  */
-function buildProvider(name: string, model: string): LLMProvider | null {
+function buildProvider(name: string, model: string, claudeCliPath?: string): LLMProvider | null {
   switch (name) {
     case 'anthropic': {
       const key = process.env.ANTHROPIC_API_KEY;
@@ -156,7 +156,7 @@ function buildProvider(name: string, model: string): LLMProvider | null {
       return new OpenAIProvider(key, model);
     }
     case 'claude-cli': {
-      return new ClaudeCliProvider(model || 'sonnet');
+      return new ClaudeCliProvider(model || 'sonnet', claudeCliPath);
     }
     default:
       return null;

@@ -9,17 +9,156 @@
  * sees time-to-first-byte and incremental progress (PRD O1/O2), and so a
  * stalled call can be killed via an AbortSignal (O8) rather than a
  * pipe-holding background timer.
+ *
+ * Locating + invoking the CLI is Phoenix's job, not the user's (B4): the binary
+ * is resolved robustly (override → PATH → known install locations) and invoked
+ * with startup-minimizing flags + non-essential-traffic disabled, so the user
+ * never has to shim a `claude` onto PATH just to add invocation flags.
  */
 
 import { spawn, execFileSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { LLMProvider, GenerateOptions, StreamHooks } from './provider.js';
+
+/**
+ * Startup-minimizing flags appended to every invocation (verified against
+ * `claude --help`, v2.1.x):
+ *  - `--strict-mcp-config` — with no `--mcp-config`, loads no user MCP servers
+ *    (a major cold-start cost).
+ *  - `--no-chrome` — skip the Claude-in-Chrome integration.
+ * Kept as a constant so it is easy to audit and override.
+ */
+export const STARTUP_FLAGS = ['--strict-mcp-config', '--no-chrome'];
+
+/** Env that disables non-essential traffic to keep cold-boot under budget. */
+export const STARTUP_ENV: Record<string, string> = {
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+};
+
+/**
+ * Compare dotted version strings numerically (newest sorts last). Each segment
+ * is parsed as a leading integer, so pre-release suffixes (`2.1.160-dev`) and
+ * stray non-numeric parts compare by their numeric prefix instead of producing
+ * NaN (which would make the sort order undefined).
+ */
+export function compareVersions(a: string, b: string): number {
+  const seg = (s: string) => s.split('.').map(p => {
+    const n = parseInt(p, 10);
+    return Number.isNaN(n) ? 0 : n;
+  });
+  const pa = seg(a);
+  const pb = seg(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** The directory the Claude desktop app installs versioned CLI builds under. */
+function desktopCliBase(): string {
+  return join(homedir(), 'Library', 'Application Support', 'Claude', 'claude-code');
+}
+
+/**
+ * Claude Code CLI binaries the desktop app installs, **newest version first**:
+ *   <base>/<version>/claude.app/Contents/MacOS/claude
+ *
+ * Enumerated fresh on every call (no cached version list) so a newly-installed
+ * version is picked up, and only version-shaped subdirectories are considered
+ * (junk like `.DS_Store` is ignored). `base` is injectable for tests.
+ */
+export function desktopCliCandidates(base: string = desktopCliBase()): string[] {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(base, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter(e => e.isDirectory() && /^\d/.test(e.name)) // version dirs only
+    .map(e => e.name)
+    .sort((a, b) => compareVersions(b, a)) // newest first
+    .map(v => join(base, v, 'claude.app', 'Contents', 'MacOS', 'claude'));
+}
+
+/** Well-known install locations to check when `claude` is not on PATH. */
+function knownLocations(): string[] {
+  const home = homedir();
+  return [
+    join(home, '.claude', 'local', 'claude'),
+    join(home, '.local', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+    ...desktopCliCandidates(),
+  ];
+}
+
+/** True if running `<path> --version` succeeds. */
+function worksAsCli(path: string): boolean {
+  try {
+    execFileSync(path, ['--version'], { stdio: 'pipe', timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Last successfully-resolved binary, reused while it remains valid. */
+let cachedPath: string | null = null;
+
+/**
+ * Resolve the `claude` binary: explicit override (arg / PHOENIX_CLAUDE_CLI_PATH)
+ * → PATH → known install locations (versioned desktop installs newest-first).
+ * Returns null if none works.
+ *
+ * Handles a newly-installed CLI version: the resolved path is reused only while
+ * it still exists on disk, so a desktop auto-update — which installs a new
+ * `<version>/` dir and removes the old one — invalidates the cached path and
+ * forces re-resolution to the new newest version. A bare `claude` (on PATH) is
+ * assumed stable for the process. Absence is not cached, so a CLI installed
+ * mid-process is still found (re-resolution is cheap: it only spawns
+ * `--version` for paths that exist).
+ */
+export function resolveClaudePath(override?: string): string | null {
+  const explicit = override ?? process.env.PHOENIX_CLAUDE_CLI_PATH;
+  if (explicit) return worksAsCli(explicit) ? explicit : null;
+
+  // Reuse the cached binary only while it is still present. 'claude' is a PATH
+  // lookup, not a filesystem path, so it can't be existence-checked here.
+  if (cachedPath && (cachedPath === 'claude' || existsSync(cachedPath))) return cachedPath;
+  cachedPath = null;
+
+  // PATH: bare `claude` resolves via the shell's PATH lookup.
+  if (worksAsCli('claude')) { cachedPath = 'claude'; return cachedPath; }
+
+  for (const loc of knownLocations()) {
+    if (existsSync(loc) && worksAsCli(loc)) { cachedPath = loc; return cachedPath; }
+  }
+
+  return null;
+}
+
+/** Reset the resolver cache (tests). */
+export function resetClaudePathCache(): void {
+  cachedPath = null;
+}
 
 export class ClaudeCliProvider implements LLMProvider {
   readonly name = 'claude-cli';
   readonly model: string;
+  private readonly cliPathOverride?: string;
 
-  constructor(model: string = 'sonnet') {
+  constructor(model: string = 'sonnet', cliPath?: string) {
     this.model = model;
+    this.cliPathOverride = cliPath;
+  }
+
+  /** The resolved binary, or a bare `claude` fallback if resolution fails. */
+  private binary(): string {
+    return resolveClaudePath(this.cliPathOverride) ?? 'claude';
   }
 
   async generate(prompt: string, options?: GenerateOptions): Promise<string> {
@@ -32,15 +171,22 @@ export class ClaudeCliProvider implements LLMProvider {
       '--model', this.model,
       '--tools', '',
       '--no-session-persistence',
+      ...STARTUP_FLAGS,
     ];
     if (options?.system) {
       args.push('--system-prompt', options.system);
     }
 
+    const bin = this.binary();
+
     return new Promise<string>((resolve, reject) => {
       // detached → the child leads its own process group, so on abort we can
       // kill the whole subtree (claude + anything it spawns) — no orphans (O11).
-      const child = spawn('claude', args, { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      const child = spawn(bin, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true,
+        env: { ...process.env, ...STARTUP_ENV },
+      });
 
       let out = '';
       let stderr = '';
@@ -110,17 +256,9 @@ export class ClaudeCliProvider implements LLMProvider {
 }
 
 /**
- * Check if the `claude` CLI is available on PATH.
+ * Check if the `claude` CLI is available — on PATH or at a known install
+ * location (B4: a non-standard install must still be found).
  */
 export function isClaudeCliAvailable(): boolean {
-  try {
-    execFileSync('claude', ['--version'], {
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return resolveClaudePath() !== null;
 }

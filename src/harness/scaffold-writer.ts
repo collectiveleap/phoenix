@@ -12,7 +12,7 @@
  * manifest.json` so it can tell "we wrote this" from "a human changed this".
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { sha256 } from '../semhash.js';
 
@@ -109,4 +109,29 @@ export function writeScaffoldFiles(
 
   saveManifest(phoenixDir, manifest);
   return report;
+}
+
+/** Every path Phoenix has written via the scaffold writer (manifest-tracked). */
+export function listTrackedScaffoldFiles(phoenixDir: string): string[] {
+  return Object.keys(loadManifest(phoenixDir).files);
+}
+
+/**
+ * Delete scaffold-tracked files whose path is not in `keep`, dropping them from
+ * the manifest. Returns the removed relative paths. Used to clean files a
+ * previous run / architecture owned (e.g. a prior arch's `src/db.ts`) that the
+ * current run no longer produces, so Phoenix owns its output tree (B5).
+ */
+export function pruneScaffoldFiles(projectRoot: string, phoenixDir: string, keep: Set<string>): string[] {
+  const manifest = loadManifest(phoenixDir);
+  const removed: string[] = [];
+  for (const rel of Object.keys(manifest.files)) {
+    if (keep.has(rel)) continue;
+    const full = join(projectRoot, rel);
+    if (existsSync(full)) rmSync(full, { force: true });
+    delete manifest.files[rel];
+    removed.push(rel);
+  }
+  if (removed.length > 0) saveManifest(phoenixDir, manifest);
+  return removed;
 }

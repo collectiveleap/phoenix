@@ -31,6 +31,14 @@ export interface PreflightOptions {
   requireNativeBuild?: boolean;
   /** Minimum Node major version. Default 18. */
   minNodeMajor?: number;
+  /**
+   * The typechecker is a Phoenix-managed devDependency (e.g. `typescript`) that
+   * the provision stage installs — not an environment prerequisite. When true,
+   * a not-yet-installed typechecker is reported but does NOT fail preflight
+   * (provision will install it). Only the package manager (A2) is the real
+   * prerequisite, since it's what installs the typechecker.
+   */
+  typecheckerProvisioned?: boolean;
 }
 
 /** True if `cmd --version` (or given probe args) runs without throwing. */
@@ -41,6 +49,11 @@ function commandWorks(cmd: string, args: string[] = ['--version']): boolean {
   } catch {
     return false;
   }
+}
+
+/** The package manager Phoenix will use to install/build, or null if none. */
+export function detectPackageManager(): string | null {
+  return ['pnpm', 'npm', 'yarn', 'bun'].find(r => commandWorks(r)) ?? null;
 }
 
 export function preflight(opts: PreflightOptions): PreflightResult {
@@ -56,17 +69,24 @@ export function preflight(opts: PreflightOptions): PreflightResult {
     remediation: nodeMajor >= minNode ? undefined : `Upgrade Node to >= ${minNode}.`,
   });
 
-  // 2. Typechecker
+  // 2. Typechecker — a Phoenix-managed devDep, not an environment prerequisite.
+  // When provision will install it, an absent typechecker is informational, not
+  // a hard failure (the package manager check above is the real prerequisite).
   const tc = probeTypechecker(opts.projectRoot);
+  const tcOk = tc.available || !!opts.typecheckerProvisioned;
   checks.push({
     name: 'typechecker',
-    ok: tc.available,
-    detail: tc.detail,
-    remediation: tc.available ? undefined : 'Install TypeScript (npm i -D typescript) or add tsc to PATH.',
+    ok: tcOk,
+    detail: tc.available
+      ? tc.detail
+      : opts.typecheckerProvisioned
+        ? `${tc.detail} — will be installed by provision`
+        : tc.detail,
+    remediation: tcOk ? undefined : 'Install TypeScript (npm i -D typescript) or add tsc to PATH.',
   });
 
   // 3. Package runner
-  const runner = ['pnpm', 'npm', 'yarn', 'bun'].find(r => commandWorks(r));
+  const runner = detectPackageManager();
   checks.push({
     name: 'package-runner',
     ok: !!runner,

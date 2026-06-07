@@ -8,7 +8,7 @@
  * how far along". Completed modules are skipped on resume.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { Clause } from '../models/clause.js';
 import type { ResolvedTarget } from '../models/architecture.js';
@@ -16,7 +16,7 @@ import type { LLMProvider } from '../llm/provider.js';
 import type { ImplementationUnit } from '../models/iu.js';
 import { canonicalize } from '../canonicalizer-llm.js';
 import { planIUs, analyzePlan } from '../iu-planner.js';
-import { deriveInterfaces, deriveServices, generateScaffold } from '../scaffold.js';
+import { deriveInterfaces, deriveServices, generateScaffold, generateProjectConfig } from '../scaffold.js';
 import { generateAll } from '../regen.js';
 import type { RegenContext } from '../regen.js';
 import { ManifestManager } from '../manifest.js';
@@ -26,7 +26,8 @@ import { RunJournal } from '../observe/journal.js';
 import type { RunSnapshot } from '../observe/journal.js';
 import { KeepAwake, abortAllInFlight } from '../observe/watchdog.js';
 import { acquireRunLock, installTeardown } from './lock.js';
-import { writeScaffoldFiles } from './scaffold-writer.js';
+import { writeScaffoldFiles, pruneScaffoldFiles } from './scaffold-writer.js';
+import { provision } from './provision.js';
 import { runAcceptance } from './acceptance.js';
 import type { AcceptanceResult } from './acceptance.js';
 import { computeResumePlan } from './resume.js';
@@ -43,6 +44,8 @@ export interface RunOptions {
   forceScaffold: boolean;
   /** Run the acceptance boot+route checks (needs installed deps). */
   runtimeChecks: boolean;
+  /** Install deps + build native deps before generating (B1/B2). */
+  install: boolean;
   /** Stage/line logger. */
   log: (msg: string) => void;
 }
@@ -133,18 +136,70 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     journal.endStage('plan', 'ok', { modules: ius.length, oversized: report.oversizedCount });
     log(`plan: ${ius.length} modules${report.oversizedCount ? `, ${report.oversizedCount} oversized ⚠` : ''}`);
 
-    // Write shared architecture files so generation typechecks resolve imports.
+    // Derive the project shape once; reused for prune, provision, and scaffold.
+    const projectName = projectRoot.split('/').pop() ?? 'app';
+    const services = deriveServices(ius);
+    const interfaces = deriveInterfaces(ius, canon.nodes);
+    const scaffold = generateScaffold(services, projectName, arch, interfaces);
+    const manifestManager = new ManifestManager(phoenixDir);
+
+    // ── Own the output tree (B5) ────────────────────────────────────────
+    // Before writing anything, prune files a previous run / architecture wrote
+    // that this run will not produce — e.g. a prior arch's shared `src/db.ts`,
+    // or modules from an earlier plan — so the acceptance typecheck never trips
+    // on foreign files. Current-plan files are kept, so resume is unaffected.
+    const keep = new Set<string>([
+      ...ius.flatMap(iu => iu.output_files),
+      ...scaffold.files.keys(),
+    ]);
+    const prunedModules = manifestManager.pruneToPaths(keep);
+    for (const rel of prunedModules) {
+      const full = join(projectRoot, rel);
+      if (existsSync(full)) rmSync(full, { force: true });
+    }
+    const prunedScaffold = pruneScaffoldFiles(projectRoot, phoenixDir, keep);
+    const prunedTotal = prunedModules.length + prunedScaffold.length;
+    if (prunedTotal > 0) log(`prune: removed ${prunedTotal} stale file(s)`);
+
+    // Write shared architecture files (tracked) so generation typechecks resolve
+    // imports — and so the writer records Phoenix as their owner for future prunes.
     if (arch) {
-      for (const [filePath, content] of Object.entries(arch.runtime.sharedFiles)) {
-        const full = join(projectRoot, filePath);
-        mkdirSync(dirname(full), { recursive: true });
-        writeFileSync(full, content, 'utf8');
+      writeScaffoldFiles(projectRoot, phoenixDir, Object.entries(arch.runtime.sharedFiles));
+    }
+
+    // ── Provision (B1/B2): write config, install deps, build native deps ──
+    // Phoenix installs the architecture's declared deps and builds any native
+    // ones, so per-module typecheck and the acceptance boot both have them —
+    // the user never runs `pnpm add`/`rebuild`. Config files are written via the
+    // scaffold writer (tracked in the manifest) so the later full scaffold sees
+    // them unchanged, not as a hand edit.
+    if (arch && opts.install) {
+      journal.startStage('provision');
+      const configFiles = generateProjectConfig(services, projectName, arch);
+      writeScaffoldFiles(projectRoot, phoenixDir, configFiles);
+      const prov = provision({
+        projectRoot,
+        nativeDeps: arch.runtime.nativeDeps,
+        log,
+      });
+      for (const s of prov.steps) log(`  ${s.ok ? '✔' : '✖'} ${s.name}: ${s.detail}`);
+      journal.endStage('provision', prov.ok ? 'ok' : 'failed', {
+        pm: prov.pm,
+        steps: prov.steps.map(s => ({ name: s.name, ok: s.ok })),
+      });
+      if (!prov.ok) {
+        journal.endRun('failed');
+        return {
+          ok: false,
+          runId: journal.runId,
+          failedStage: 'provision',
+          error: prov.steps.find(s => !s.ok)?.detail,
+        };
       }
     }
 
     // ── Generate (with resume) ──────────────────────────────────────────
     journal.startStage('generate');
-    const interfaces = deriveInterfaces(ius, canon.nodes);
     const { completed, pending } = opts.resume
       ? computeResumePlan(phoenixDir, projectRoot, ius)
       : { completed: [] as ImplementationUnit[], pending: ius };
@@ -159,13 +214,15 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       interfaces,
       journal,
       budgets: policy.budgets,
+      maxRetries: policy.maxRetries,
+      maxRepairs: policy.maxRepairs,
+      backoffMs: policy.backoffMs,
       onProgress: (iu, status, msg) => {
         if (status === 'done') log(`  ✔ ${iu.name}`);
         else if (status === 'error') log(`  ✖ ${iu.name}: ${msg ?? 'failed'}`);
       },
     };
 
-    const manifestManager = new ManifestManager(phoenixDir);
     const results = await generateAll(pending, regenCtx);
     for (const result of results) {
       for (const [filePath, content] of result.files) {
@@ -179,8 +236,6 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
 
     // ── Scaffold ────────────────────────────────────────────────────────
     journal.startStage('scaffold');
-    const services = deriveServices(ius);
-    const scaffold = generateScaffold(services, projectRoot.split('/').pop() ?? 'app', arch, interfaces);
     const scaffoldReport = writeScaffoldFiles(projectRoot, phoenixDir, scaffold.files, { force: opts.forceScaffold });
     const handEdits = scaffoldReport.filter(e => e.status === 'kept-hand-edited');
     if (handEdits.length > 0) log(`scaffold: kept ${handEdits.length} hand-edited file(s) ⚠`);

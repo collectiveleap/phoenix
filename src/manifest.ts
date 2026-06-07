@@ -88,4 +88,29 @@ export class ManifestManager {
     }
     return files;
   }
+
+  /**
+   * Drop tracked file records whose path is not in `keep`, returning the removed
+   * paths so the caller can delete them from disk. Lets a regenerate-from-scratch
+   * run clean modules a previous plan/architecture produced but the current plan
+   * no longer does (B5). Does not touch files the current plan still owns.
+   */
+  pruneToPaths(keep: Set<string>): string[] {
+    const manifest = this.load();
+    const removed: string[] = [];
+    for (const [id, iu] of Object.entries(manifest.iu_manifests)) {
+      const files = Object.keys(iu.files);
+      const stale = files.filter(f => !keep.has(f));
+      if (stale.length === 0) continue;
+      for (const f of stale) {
+        delete iu.files[f];
+        removed.push(f);
+      }
+      if (Object.keys(iu.files).length === 0) {
+        delete manifest.iu_manifests[id];
+      }
+    }
+    if (removed.length > 0) this.save(manifest);
+    return removed;
+  }
 }

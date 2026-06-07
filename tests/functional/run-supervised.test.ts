@@ -45,6 +45,7 @@ describe('Supervised run (O15/O16: unattended pipeline under the harness)', () =
       resume,
       forceScaffold: false,
       runtimeChecks: false,
+      install: false,
       log: () => {},
     };
   }
