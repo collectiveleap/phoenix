@@ -146,16 +146,23 @@ export function buildPrompt(
   lines.push(`## Risk Tier: ${iu.risk_tier}`);
   lines.push('');
 
-  // Context: sibling modules with mount paths from the interface registry
+  // Context: sibling provider modules and their interface contract (C2). The
+  // contract is the authoritative boundary — list each provider's declared
+  // operations via the architecture's dialect so the consumer calls exactly those,
+  // never an address invented from the spec's domain language.
   if (siblingModules && siblingModules.length > 0) {
+    const dialect = target?.runtime.interfaceDialect;
     if (target) {
-      lines.push(`## Other API modules (do NOT import them — call their HTTP endpoints from JavaScript):`);
+      lines.push(`## Other modules — call their declared interface ONLY (do NOT import them, do NOT invent paths):`);
       for (const entry of siblingModules) {
         if (entry.role === 'web-ui') continue; // skip other web modules
-        let line = `- "${entry.name}" mounted at ${entry.mount_path} — use fetch('${entry.mount_path}') or fetch('${entry.mount_path}/...') to call it`;
-        if (entry.resource_fields) {
-          line += `. Resource shape: ${entry.resource_fields}`;
+        if (dialect && entry.contract) {
+          lines.push(dialect.describeForPrompt(entry.contract));
+          continue;
         }
+        // Fallback (no dialect/contract): the legacy mount-path hint.
+        let line = `- "${entry.name}" mounted at ${entry.mount_path} — use fetch('${entry.mount_path}') or fetch('${entry.mount_path}/...') to call it`;
+        if (entry.resource_fields) line += `. Resource shape: ${entry.resource_fields}`;
         lines.push(line);
       }
     } else {

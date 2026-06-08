@@ -6,6 +6,7 @@
  */
 
 import type { RuntimeTarget } from '../models/architecture.js';
+import { restDialect } from './dialects/rest.js';
 
 // ─── Module template (LLM fills in marked sections) ─────────────────────────
 
@@ -249,6 +250,8 @@ export const nodeTypescript: RuntimeTarget = {
     'src/db.ts': DB_FILE,
     'src/app.ts': APP_FILE,
   },
+
+  interfaceDialect: restDialect,
 
   packageExtras: {
     scripts: {

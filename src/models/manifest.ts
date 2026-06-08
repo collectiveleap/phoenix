@@ -20,6 +20,13 @@ export interface IUManifest {
   iu_name: string;
   files: Record<string, FileManifestEntry>;
   regen_metadata: RegenMetadata;
+  /**
+   * Interface contracts this module consumed at generation, `provider_iu_id →
+   * contract_hash`. When a provider's contract changes, a consumer whose recorded
+   * hash no longer matches is invalidated and regenerated (selective invalidation
+   * on the runtime interface edge).
+   */
+  consumed_contracts?: Record<string, string>;
 }
 
 export interface GeneratedManifest {

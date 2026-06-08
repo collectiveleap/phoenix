@@ -440,7 +440,7 @@ async function cmdBootstrap(): Promise<void> {
     } catch { /* best effort */ }
   }
 
-  const interfaces = deriveInterfaces(ius, canonNodes);
+  const interfaces = deriveInterfaces(ius, canonNodes, arch);
 
   const regenCtx: RegenContext = {
     llm: llm ?? undefined,
@@ -1140,7 +1140,7 @@ async function cmdRegen(args: string[]): Promise<void> {
     } catch { /* ignore */ }
   }
 
-  const regenInterfaces = deriveInterfaces(ius, canonNodes);
+  const regenInterfaces = deriveInterfaces(ius, canonNodes, regenArch);
 
   // Journal + bounds make a single-module regen observable and capturable (G1/G4):
   // the call lifecycle is recorded and a runaway is bounded + its partial output
@@ -1226,7 +1226,7 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   // Re-generate scaffold wiring
   const allIUs = loadIUs(phoenixDir);
-  const allInterfaces = deriveInterfaces(allIUs, canonNodes);
+  const allInterfaces = deriveInterfaces(allIUs, canonNodes, regenArch);
   const services = deriveServices(allIUs);
   const scaffold = generateScaffold(services, basename(projectRoot), regenArch, allInterfaces);
   const forceScaffold = args.includes('--force-scaffold');
@@ -1251,11 +1251,23 @@ function printPreflight(result: PreflightResult): void {
 
 function cmdPreflight(args: string[]): void {
   const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  // Derive architecture-conditional checks from the bound architecture (like run),
+  // not a manual flag: the C-toolchain requirement is a property of the chosen
+  // arch's native deps. Unbound ⇒ nothing architecture-derived is asserted (DC5).
+  const configPath = join(phoenixDir, 'config.json');
+  let arch: ResolvedTarget | null = null;
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (config.architecture) arch = resolveTarget(config.architecture);
+    } catch { /* ignore */ }
+  }
   const result = preflight({
     projectRoot,
     phoenixDir,
     requireProvider: !args.includes('--no-provider'),
-    requireNativeBuild: args.includes('--native'),
+    minNodeMajor: arch?.runtime.minNodeMajor,
+    requireNativeBuild: (arch?.runtime.nativeDeps?.length ?? 0) > 0,
   });
   printPreflight(result);
   if (!result.ok) process.exitCode = 1;
@@ -1297,9 +1309,6 @@ async function cmdRun(args: string[]): Promise<void> {
     requireProvider: true,
     minNodeMajor: arch?.runtime.minNodeMajor,
     requireNativeBuild: (arch?.runtime.nativeDeps?.length ?? 0) > 0,
-    // The typechecker (typescript) is installed by the provision stage, so a
-    // not-yet-installed tsc must not block a fresh regenerate-from-scratch run.
-    typecheckerProvisioned: install && !!arch?.runtime.devPackages?.['typescript'],
   });
   printPreflight(pf);
   console.log();

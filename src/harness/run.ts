@@ -30,6 +30,7 @@ import { acquireRunLock, installTeardown } from './lock.js';
 import { writeScaffoldFiles, pruneScaffoldFiles } from './scaffold-writer.js';
 import { provision } from './provision.js';
 import { runAcceptance } from './acceptance.js';
+import { checkInterfaceContracts } from './contract-check.js';
 import type { AcceptanceResult } from './acceptance.js';
 import { computeResumePlan } from './resume.js';
 import type { RunPolicy } from './policy.js';
@@ -140,7 +141,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     // Derive the project shape once; reused for prune, provision, and scaffold.
     const projectName = projectRoot.split('/').pop() ?? 'app';
     const services = deriveServices(ius);
-    const interfaces = deriveInterfaces(ius, canon.nodes);
+    const interfaces = deriveInterfaces(ius, canon.nodes, arch);
     const scaffold = generateScaffold(services, projectName, arch, interfaces);
     const manifestManager = new ManifestManager(phoenixDir);
 
@@ -202,7 +203,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     // ── Generate (with resume) ──────────────────────────────────────────
     journal.startStage('generate');
     const { completed, pending } = opts.resume
-      ? computeResumePlan(phoenixDir, projectRoot, ius)
+      ? computeResumePlan(phoenixDir, projectRoot, ius, interfaces)
       : { completed: [] as ImplementationUnit[], pending: ius };
     if (completed.length > 0) log(`resume: skipping ${completed.length} completed module(s)`);
 
@@ -270,12 +271,29 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     // ── Acceptance gate (O12) ───────────────────────────────────────────
     journal.startStage('acceptance');
     const acceptance = await runAcceptance({ projectRoot, skipRuntime: !opts.runtimeChecks });
-    journal.endStage('acceptance', acceptance.ok ? 'ok' : 'failed', {
+
+    // Cross-module interface contract (C3 + provider conformance): static, runs
+    // regardless of runtime checks — a UI that calls an address no module serves
+    // must not pass as "verified".
+    const contract = checkInterfaceContracts(projectRoot, ius, interfaces, arch?.runtime.interfaceDialect, { checkProviders: true });
+    acceptance.checks.push({
+      name: 'cross-module-contract',
+      ok: contract.ok,
+      detail: contract.ok
+        ? (contract.checked === 0 ? 'no runtime interface contracts to check' : `${contract.checked} module(s) — all calls resolve`)
+        : contract.violations.map(v => v.detail).join('; '),
+    });
+    if (contract.violations.length > 0) {
+      journal.event('contract_violations', { count: contract.violations.length, violations: contract.violations });
+    }
+
+    const gateOk = acceptance.ok && contract.ok;
+    journal.endStage('acceptance', gateOk ? 'ok' : 'failed', {
       checks: acceptance.checks.map(c => ({ name: c.name, ok: c.ok })),
     });
     for (const c of acceptance.checks) log(`  ${c.ok ? '✔' : '✖'} ${c.name}: ${c.detail}`);
 
-    const ok = acceptance.ok;
+    const ok = gateOk;
     journal.endRun(ok ? 'ok' : 'failed');
     return {
       ok,

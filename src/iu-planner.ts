@@ -138,6 +138,19 @@ export function planIUs(
   // Sort for deterministic output
   ius.sort((a, b) => a.output_files[0].localeCompare(b.output_files[0]));
 
+  // Model the runtime interface edge: a web-ui module depends on the api modules
+  // in its own service (it calls them over the wire). This makes the consumer→
+  // provider dependency a real graph edge — the substrate for contract-bearing
+  // invalidation (a provider interface change re-runs its consumers) and cascade.
+  const serviceDir = (iu: ImplementationUnit) => iu.output_files[0]?.split('/').slice(0, -1).join('/') ?? '';
+  const isWebUI = (iu: ImplementationUnit) => /\b(web|ui|frontend|interface|page|dashboard)\b/.test(iu.name.toLowerCase());
+  for (const iu of ius) {
+    if (!isWebUI(iu)) continue;
+    iu.dependencies = ius
+      .filter(o => o.iu_id !== iu.iu_id && !isWebUI(o) && serviceDir(o) === serviceDir(iu))
+      .map(o => o.iu_id);
+  }
+
   return ius;
 }
 

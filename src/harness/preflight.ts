@@ -7,7 +7,6 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { probeTypechecker } from './typecheck.js';
 import { resolveProviderInfo } from '../llm/resolve.js';
 
 export interface PreflightCheck {
@@ -31,14 +30,6 @@ export interface PreflightOptions {
   requireNativeBuild?: boolean;
   /** Minimum Node major version. Default 18. */
   minNodeMajor?: number;
-  /**
-   * The typechecker is a Phoenix-managed devDependency (e.g. `typescript`) that
-   * the provision stage installs — not an environment prerequisite. When true,
-   * a not-yet-installed typechecker is reported but does NOT fail preflight
-   * (provision will install it). Only the package manager (A2) is the real
-   * prerequisite, since it's what installs the typechecker.
-   */
-  typecheckerProvisioned?: boolean;
 }
 
 /** True if `cmd --version` (or given probe args) runs without throwing. */
@@ -69,23 +60,14 @@ export function preflight(opts: PreflightOptions): PreflightResult {
     remediation: nodeMajor >= minNode ? undefined : `Upgrade Node to >= ${minNode}.`,
   });
 
-  // 2. Typechecker — a Phoenix-managed devDep, not an environment prerequisite.
-  // When provision will install it, an absent typechecker is informational, not
-  // a hard failure (the package manager check above is the real prerequisite).
-  const tc = probeTypechecker(opts.projectRoot);
-  const tcOk = tc.available || !!opts.typecheckerProvisioned;
-  checks.push({
-    name: 'typechecker',
-    ok: tcOk,
-    detail: tc.available
-      ? tc.detail
-      : opts.typecheckerProvisioned
-        ? `${tc.detail} — will be installed by provision`
-        : tc.detail,
-    remediation: tcOk ? undefined : 'Install TypeScript (npm i -D typescript) or add tsc to PATH.',
-  });
+  // The typechecker is intentionally NOT checked here: it is an architecture-
+  // derived, Phoenix-installed dependency (a devDep the provision step installs),
+  // not a host-supplied prerequisite. Its enforcement lives downstream — the
+  // per-module typecheck (O3) and the acceptance typecheck — so a genuinely
+  // missing/broken `tsc` surfaces as a Phoenix install/build failure, not as a
+  // user-facing environment gate. (See DEPENDENCY-LIFECYCLE-OUTCOMES, DC1/DC4.)
 
-  // 3. Package runner
+  // 2. Package runner
   const runner = detectPackageManager();
   checks.push({
     name: 'package-runner',
@@ -94,7 +76,7 @@ export function preflight(opts: PreflightOptions): PreflightResult {
     remediation: runner ? undefined : 'Install npm, pnpm, yarn, or bun to install dependencies.',
   });
 
-  // 4. Provider reachable (only when generation is required)
+  // 3. Provider reachable (only when generation is required)
   if (opts.requireProvider) {
     const info = resolveProviderInfo(opts.phoenixDir);
     checks.push({
@@ -105,7 +87,7 @@ export function preflight(opts: PreflightOptions): PreflightResult {
     });
   }
 
-  // 5. Native-build capability (only when an arch needs native modules)
+  // 4. Native-build capability (only when an arch needs native modules)
   if (opts.requireNativeBuild) {
     const compiler = ['cc', 'clang', 'gcc'].find(c => commandWorks(c, ['--version']));
     checks.push({

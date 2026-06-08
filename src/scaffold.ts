@@ -12,6 +12,8 @@
 import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { ResolvedTarget } from './models/architecture.js';
+import type { InterfaceContract } from './models/interface-contract.js';
+import { makeContract } from './models/interface-contract.js';
 import { sha256 } from './semhash.js';
 
 export interface ServiceDescriptor {
@@ -47,27 +49,46 @@ export interface InterfaceEntry {
   role: 'api' | 'web-ui';
   /** Resource field description extracted from canonical nodes (e.g., "a name and a color"). */
   resource_fields: string;
+  /**
+   * The provider's interface contract (operations + hash), built via the target's
+   * `InterfaceDialect`. Present on `api` entries when a dialect-bearing target is
+   * supplied — this is the deterministic boundary consumers bind to and the gate
+   * verifies. Absent ⇒ no runtime contract (degrade to the static boundary).
+   */
+  contract?: InterfaceContract;
 }
 
 /**
  * Derive the interface registry from the IU plan and canonical nodes.
- * This is the single source of truth for mount paths and resource shapes —
- * both scaffold generation and LLM prompt building must use this.
+ * This is the single source of truth for mount paths, resource shapes, and (when
+ * a dialect-bearing `target` is given) the interface contracts. Both scaffold
+ * generation and LLM prompt building must use this.
  */
 export function deriveInterfaces(
   ius: ImplementationUnit[],
   canonNodes?: CanonicalNode[],
+  target?: ResolvedTarget | null,
 ): InterfaceEntry[] {
+  const dialect = target?.runtime.interfaceDialect;
   return ius.map(iu => {
     const lowerName = iu.name.toLowerCase();
     const isWebUI = /\b(web|ui|frontend|interface|page|dashboard)\b/.test(lowerName);
-    return {
+    const role = isWebUI ? 'web-ui' as const : 'api' as const;
+    const resource_fields = extractResourceFields(iu, canonNodes);
+    const entry: InterfaceEntry = {
       iu_id: iu.iu_id,
       name: iu.name,
       mount_path: isWebUI ? '' : '/' + lowerName.replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, ''),
-      role: isWebUI ? 'web-ui' as const : 'api' as const,
-      resource_fields: extractResourceFields(iu, canonNodes),
+      role,
+      resource_fields,
     };
+    // Build the contract for provider (api) modules when the target has a dialect.
+    if (role === 'api' && dialect) {
+      entry.contract = makeContract(
+        iu.iu_id, iu.name, dialect.deriveOperations(iu, canonNodes ?? []), resource_fields,
+      );
+    }
+    return entry;
   });
 }
 
@@ -180,6 +201,17 @@ export function generateScaffold(
     ].join('\n');
 
     files.set('src/server.ts', serverContent);
+
+    // Generated interface-contract client (C1): a typed wrapper over each provider's
+    // declared operations, so consumers call the contract instead of free-text
+    // addresses. Emitted via the architecture's dialect; absent if it has none.
+    const dialect = rt.interfaceDialect;
+    const contracts = (interfaces ?? []).map(e => e.contract).filter((c): c is NonNullable<typeof c> => !!c);
+    if (dialect && contracts.length > 0) {
+      for (const [rel, content] of Object.entries(dialect.generateClient(contracts))) {
+        files.set(`src/generated/${rel}`, content);
+      }
+    }
   }
 
   for (const svc of services) {

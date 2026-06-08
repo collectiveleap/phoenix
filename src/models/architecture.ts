@@ -14,6 +14,8 @@
  *         → Generated Code
  */
 
+import type { InterfaceDialect } from './interface-contract.js';
+
 // ─── Architecture (system shape, language-agnostic) ─────────────────────────
 
 export interface Architecture {
@@ -74,6 +76,14 @@ export interface RuntimeTarget {
   sharedFiles: Record<string, string>;
   /** Extra package.json / pyproject.toml fields */
   packageExtras: Record<string, unknown>;
+
+  /**
+   * Translates the neutral inter-module interface contract to this target's
+   * transport (REST URLs, RPC names, message topics, …). Absent ⇒ this target has
+   * no runtime module decoupling, so the internal-static boundary (`allowed_ius`)
+   * governs and no runtime-interface contract is enforced.
+   */
+  interfaceDialect?: InterfaceDialect;
 }
 
 // ─── Resolved target (what the pipeline actually uses) ──────────────────────

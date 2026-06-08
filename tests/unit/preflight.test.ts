@@ -17,20 +17,20 @@ describe('Preflight (O9: verify toolchain before a run)', () => {
   });
   afterEach(() => { process.env = { ...saved }; });
 
-  it('passes the runtime check and reports per-assumption results', () => {
+  it('checks the host prerequisites and reports per-assumption results', () => {
     const result = preflight({ projectRoot });
     const names = result.checks.map(c => c.name);
-    expect(names).toEqual(expect.arrayContaining(['runtime', 'typechecker', 'package-runner']));
+    expect(names).toEqual(expect.arrayContaining(['runtime', 'package-runner']));
     expect(result.checks.find(c => c.name === 'runtime')!.ok).toBe(true);
   });
 
-  it('fails fast with remediation when the typechecker is hidden (appendix #1/O9)', () => {
-    // Empty projectRoot has no local tsc and this sandbox has no global tsc/npx.
+  it('does NOT gate on the typechecker — an installable, Phoenix-provisioned dep (DC1/DC4)', () => {
+    // Empty projectRoot has no local tsc and this sandbox has no global tsc/npx —
+    // yet preflight must neither check nor fail on the typechecker (provision
+    // installs it; the acceptance typecheck enforces it downstream).
     const result = preflight({ projectRoot });
-    const tc = result.checks.find(c => c.name === 'typechecker')!;
-    expect(tc.ok).toBe(false);
-    expect(tc.remediation).toMatch(/typescript|tsc/i);
-    expect(result.ok).toBe(false);
+    expect(result.checks.some(c => c.name === 'typechecker')).toBe(false);
+    expect(result.ok).toBe(true); // host prereqs present (no provider required)
   });
 
   it('flags a missing provider only when generation is required', () => {

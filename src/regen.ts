@@ -180,6 +180,14 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     generated_at: now,
   };
 
+  // Record the interface contracts this module consumed (its provider deps), so a
+  // later provider-contract change invalidates and regenerates this consumer.
+  const consumed: Record<string, string> = {};
+  for (const depId of iu.dependencies) {
+    const hash = ctx?.interfaces?.find(e => e.iu_id === depId)?.contract?.contract_hash;
+    if (hash) consumed[depId] = hash;
+  }
+
   return {
     iu_id: iu.iu_id,
     files,
@@ -188,6 +196,7 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
       iu_name: iu.name,
       files: fileEntries,
       regen_metadata: metadata,
+      ...(Object.keys(consumed).length > 0 ? { consumed_contracts: consumed } : {}),
     },
   };
 }
@@ -447,9 +456,15 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
     }
   }
 
-  // Repair fetch paths to match the interface registry.
-  // The LLM may use paths like /todos instead of /tasks — the registry is the ground truth.
-  if (interfaces && interfaces.length > 0) {
+  // Bind the consumer to the interface contract (C1): deterministically repair any
+  // call that addresses an operation the registry doesn't declare. The architecture's
+  // dialect owns the transport-specific repair; without a dialect, fall back to the
+  // legacy fetch-path repair. The registry is the ground truth either way.
+  const dialect = target?.runtime.interfaceDialect;
+  const contracts = (interfaces ?? []).map(e => e.contract).filter((c): c is NonNullable<typeof c> => !!c);
+  if (dialect && contracts.length > 0) {
+    code = dialect.bindConsumer(code, contracts);
+  } else if (interfaces && interfaces.length > 0) {
     code = repairFetchPaths(code, interfaces);
   }
 
