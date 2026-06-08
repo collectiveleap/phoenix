@@ -1181,9 +1181,13 @@ async function cmdRegen(args: string[]): Promise<void> {
     const c = callByTarget.get(iuName);
     if (!c) return '';
     const ms = c.endedAt && c.startedAt ? c.endedAt - c.startedAt : undefined;
+    // First-content latency (D1): with OP1, ttfbAt marks the first content token —
+    // for opus this is its think time, used to tune PHOENIX_OPUS_FIRST_CONTENT_MS.
+    const ttfbMs = c.ttfbAt && c.startedAt ? c.ttfbAt - c.startedAt : undefined;
     const parts = [
       `${c.bytesStreamed} B`,
       ms !== undefined ? `${(ms / 1000).toFixed(1)}s` : undefined,
+      ttfbMs !== undefined ? `ttfb:${(ttfbMs / 1000).toFixed(1)}s` : undefined,
       c.stopReason ? `stop:${c.stopReason}` : `outcome:${c.outcome}`,
       `model:${c.model}`,
     ].filter(Boolean);

@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { generateIU } from '../../src/regen.js';
+import { generateIU, budgetsForModel, OPUS_FIRST_CONTENT_MS, OPUS_MAX_DURATION_MS } from '../../src/regen.js';
 import { planIUs } from '../../src/iu-planner.js';
 import { parseSpec } from '../../src/spec-parser.js';
 import { extractCanonicalNodes } from '../../src/canonicalizer.js';
@@ -36,6 +36,30 @@ class RunawayProvider implements LLMProvider {
       // Safety: never hang the test if the bound somehow doesn't fire.
       const safety = setTimeout(() => { clearInterval(iv); resolve('x'.repeat(total)); }, 8000);
     });
+  }
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Mimics opus (OP1/OP3): an envelope-only heartbeat (onChunk, no content), then a
+ * silent "thinking" gap, then first content + a clean completion. Crucially it
+ * fires onFirstByte only with content — exactly the contract OP1 gives claude-cli.
+ */
+class EnvelopeThenContentProvider implements LLMProvider {
+  readonly name = 'opus-like';
+  readonly model = 'opus';
+  constructor(private thinkMs: number) {}
+  generate(p: string, o?: GenerateOptions): Promise<string> { return this.generateStream(p, o); }
+  async generateStream(_p: string, o?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
+    hooks?.onChunk?.(1114, ''); // init envelope — heartbeat only, NO content
+    await sleep(this.thinkMs);  // silent thinking
+    if (o?.signal?.aborted) throw new Error('killed by SIGKILL'); // pre-OP1 would kill here
+    hooks?.onFirstByte?.();     // first CONTENT
+    hooks?.onChunk?.(1200, 'export const x = 1;');
+    hooks?.onStopReason?.('end_turn');
+    hooks?.onStreamEnd?.();
+    return 'export const x = 1;';
   }
 }
 
@@ -168,4 +192,53 @@ describe('G4: regen hard-fails a bounds runaway (no stub, no retry) and captures
     expect(events.some(e => e.type === 'generate_retry')).toBe(false);
     expect(events.find(e => e.type === 'module_failed')?.reason).toBe('over_generation_bounds');
   }, 15000);
+});
+
+describe('OP2: the first-content/duration budget is sized to the model', () => {
+  const base = { ...DEFAULT_BUDGETS, startupMs: 60_000, maxDurationMs: 300_000 };
+
+  it('raises startupMs and maxDurationMs for an opus model', () => {
+    const b = budgetsForModel(base, 'opus');
+    expect(b.startupMs).toBe(OPUS_FIRST_CONTENT_MS);
+    expect(b.maxDurationMs).toBe(OPUS_MAX_DURATION_MS);
+    // matches full ids too
+    expect(budgetsForModel(base, 'claude-opus-4-8').startupMs).toBe(OPUS_FIRST_CONTENT_MS);
+  });
+
+  it('leaves non-opus models unchanged', () => {
+    expect(budgetsForModel(base, 'sonnet')).toEqual(base);
+    expect(budgetsForModel(base, undefined)).toEqual(base);
+  });
+
+  it('never shrinks an already-larger configured budget', () => {
+    const big = { ...base, startupMs: OPUS_FIRST_CONTENT_MS + 100_000 };
+    expect(budgetsForModel(big, 'opus').startupMs).toBe(OPUS_FIRST_CONTENT_MS + 100_000);
+  });
+});
+
+describe('OP1+OP3: a model that thinks before emitting is not killed during the silent phase', () => {
+  let phoenixRoot: string;
+  beforeEach(() => { phoenixRoot = mkdtempSync(join(tmpdir(), 'phoenix-op-')); });
+
+  it('survives an envelope-then-silence longer than streamStallMs, then completes', async () => {
+    const journal = new RunJournal(phoenixRoot);
+    journal.startRun();
+    // think 500ms: longer than the 200ms stream-stall budget, but shorter than the
+    // 2000ms first-content (startup) budget. Pre-OP1 the envelope would have set
+    // ttfb → stream-stall kill at ~200ms. With OP1 the call stays in startup.
+    const provider = new EnvelopeThenContentProvider(500);
+    const budgets = { ...DEFAULT_BUDGETS, startupMs: 2000, streamStallMs: 200 };
+
+    const out = await supervisedGenerate(
+      journal, provider, 'p', undefined,
+      { stage: 'generate', target: 'Think', attempt: 0 },
+      { budgets, pollMs: 20 },
+    );
+
+    expect(out).toBe('export const x = 1;');
+    const events = RunJournal.readEvents(phoenixRoot, journal.runId);
+    expect(events.some(e => e.type === 'watchdog_kill')).toBe(false);
+    expect(events.some(e => e.type === 'generation_bounds_exceeded')).toBe(false);
+    expect(events.find(e => e.type === 'call_end')?.outcome).toBe('ok');
+  });
 });

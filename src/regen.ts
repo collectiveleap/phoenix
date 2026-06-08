@@ -281,6 +281,31 @@ const MAX_RETRIES = 2;
  */
 export const GENERATE_MAX_TOKENS = Number(process.env.PHOENIX_GENERATE_MAX_TOKENS) || 32000;
 
+/**
+ * Opus reasons before emitting output, so its time-to-first-content can far exceed
+ * the default 60s first-content budget — it was being killed mid-thinking (OP2).
+ * Give an opus generate call a larger first-content budget and a larger total
+ * duration bound (so a legitimate long think + stream isn't false-tripped by the
+ * G4 runaway bound). Both env-overridable.
+ */
+export const OPUS_FIRST_CONTENT_MS = Number(process.env.PHOENIX_OPUS_FIRST_CONTENT_MS) || 240_000;
+export const OPUS_MAX_DURATION_MS = Number(process.env.PHOENIX_OPUS_MAX_DURATION_MS) || 600_000;
+
+/**
+ * Adjust watchdog budgets for the model that will run the call (OP2). An opus
+ * model gets a larger first-content (`startupMs`) budget and a larger total
+ * duration bound; other models are unchanged. Never shrinks an explicitly-larger
+ * configured budget.
+ */
+export function budgetsForModel(budgets: HealthBudgets, model: string | undefined): HealthBudgets {
+  if (!model || !/opus/i.test(model)) return budgets;
+  return {
+    ...budgets,
+    startupMs: Math.max(budgets.startupMs, OPUS_FIRST_CONTENT_MS),
+    maxDurationMs: Math.max(budgets.maxDurationMs ?? 0, OPUS_MAX_DURATION_MS),
+  };
+}
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
@@ -316,7 +341,10 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   // (O2/O8); otherwise record-only; otherwise plain generation.
   const callLLM = async (p: string, opts: GenerateOptions, attempt: number): Promise<string> => {
     if (journal && budgets) {
-      return supervisedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt }, { budgets });
+      // Size the first-content/duration budgets to the model actually running the
+      // call (OP2) — opus needs longer to first content than the 60s default.
+      const callBudgets = budgetsForModel(budgets, opts.model ?? llm.model);
+      return supervisedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt }, { budgets: callBudgets });
     }
     if (journal) {
       return recordedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt });

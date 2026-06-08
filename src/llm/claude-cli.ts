@@ -332,10 +332,6 @@ export class ClaudeCliProvider implements LLMProvider {
       });
 
       child.stdout.on('data', (chunk: Buffer) => {
-        if (!firstByteSeen) {
-          firstByteSeen = true;
-          hooks?.onFirstByte?.();
-        }
         bytes += chunk.length;
         buffer += chunk.toString('utf8');
         let delta = '';
@@ -344,6 +340,15 @@ export class ClaudeCliProvider implements LLMProvider {
           const line = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 1);
           delta += consumeLine(line);
+        }
+        // First-CONTENT byte (OP1): fire onFirstByte only once real assistant text
+        // has arrived — NOT on the stream-json `system/init` envelope (which carries
+        // no text). Otherwise a model that reasons before emitting (opus) looks
+        // "past first byte" during silent thinking and is killed by the stream-stall
+        // budget instead of the first-content (startup) budget.
+        if (!firstByteSeen && delta.length > 0) {
+          firstByteSeen = true;
+          hooks?.onFirstByte?.();
         }
         // Heartbeat on every chunk — even envelope-only events that carry no
         // text — so bytesStreamed rises and the watchdog never kills a live

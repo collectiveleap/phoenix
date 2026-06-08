@@ -215,8 +215,9 @@ describe('Claude CLI streaming (S1/S2: incremental output, not a single end-jump
     expect(text).toBe('export const a = 1;');
     expect(text).not.toContain('"type"');
 
-    // First byte arrived before any later activity (early TTFB, not at the end).
-    expect(firstByteAt).toBe(1);
+    // First-CONTENT byte fires on the first text chunk — AFTER the init envelope
+    // (calls=1), not on it (OP1) — but still early, not at the end.
+    expect(firstByteAt).toBe(2);
 
     // bytesStreamed rose across ≥2 progress events — not a single jump at the end.
     expect(progress.length).toBeGreaterThanOrEqual(2);
@@ -231,6 +232,26 @@ describe('Claude CLI streaming (S1/S2: incremental output, not a single end-jump
     ]);
     const provider = new ClaudeCliProvider('sonnet', bin);
     await expect(provider.generateStream('p')).rejects.toThrow(/Claude CLI error: boom/);
+  });
+
+  it('does not fire onFirstByte for an envelope-only stream with no content (OP1)', async () => {
+    // Mimics opus thinking: only the init envelope arrives, then the stream ends
+    // with no assistant text — first-CONTENT byte must never be signalled.
+    const bin = writeStreamingCli([
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      JSON.stringify({ type: 'system', subtype: 'status' }),
+    ]);
+    const provider = new ClaudeCliProvider('sonnet', bin);
+    let firstByteFired = false;
+    let chunks = 0;
+    await expect(
+      provider.generateStream('p', undefined, {
+        onFirstByte: () => { firstByteFired = true; },
+        onChunk: () => { chunks++; },
+      }),
+    ).rejects.toThrow(/empty response/);
+    expect(firstByteFired).toBe(false); // envelope alone is not "first content"
+    expect(chunks).toBeGreaterThan(0);  // …but envelope chunks still heartbeat (S2)
   });
 
   /** A fake `claude` that echoes the output-budget env var into its result. */
