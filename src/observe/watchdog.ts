@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { RunJournal, DEFAULT_BUDGETS } from './journal.js';
 import type { HealthBudgets, CallHealth } from './journal.js';
-import { recordedGenerate } from './instrument.js';
+import { recordedGenerate, BoundsExceededError } from './instrument.js';
 import type { CallContext } from './instrument.js';
 import type { LLMProvider, GenerateOptions } from '../llm/provider.js';
 
@@ -26,6 +26,7 @@ const KILL_HEALTH: ReadonlySet<CallHealth> = new Set<CallHealth>([
   'startup-stalled',
   'stream-stalled',
   'returned-then-wedged',
+  'exceeded-bounds',
 ]);
 
 export interface WatchdogOptions {
@@ -79,19 +80,26 @@ export async function supervisedGenerate(
     const rec = journal.getCall(callId);
     if (!rec || rec.endedAt !== undefined) return;
     const health = RunJournal.classify(rec, budgets);
-    if (KILL_HEALTH.has(health)) {
-      killed = true;
+    if (!KILL_HEALTH.has(health)) return;
+    killed = true;
+    const elapsedMs = Date.now() - rec.startedAt;
+    if (health === 'exceeded-bounds') {
+      // Runaway (G4): bound by bytes or wall-clock, not a stall. Abort WITH a
+      // typed reason so instrument records `over_budget` and re-throws it with the
+      // captured partial output — distinct event, never `watchdog_kill`.
+      const bound = budgets.maxBytes && rec.bytesStreamed > budgets.maxBytes ? 'bytes' : 'duration';
+      journal.event('generation_bounds_exceeded', {
+        callId, bound, bytes: rec.bytesStreamed, elapsedMs,
+        stage: rec.stage, target: rec.target, attempt: rec.attempt,
+      });
+      controller.abort(new BoundsExceededError(bound, rec.bytesStreamed, elapsedMs));
+    } else {
       journal.event('watchdog_kill', {
-        callId,
-        health,
-        stage: rec.stage,
-        target: rec.target,
-        attempt: rec.attempt,
-        elapsedMs: Date.now() - rec.startedAt,
+        callId, health, stage: rec.stage, target: rec.target, attempt: rec.attempt, elapsedMs,
       });
       controller.abort();
-      clearInterval(timer);
     }
+    clearInterval(timer);
   }, pollMs);
   // Don't let the poll timer keep the process alive on its own.
   (timer as unknown as { unref?: () => void }).unref?.();
@@ -106,6 +114,8 @@ export async function supervisedGenerate(
       { onCallStart: (id) => { callId = id; } },
     );
   } catch (err) {
+    // A bounds abort (G4) is already a precise, captured error — surface it as-is.
+    if (err instanceof BoundsExceededError) throw err;
     if (killed) {
       const message = err instanceof Error ? err.message : String(err);
       throw new Error(`Watchdog killed stalled call (${ctx.target ?? ctx.stage}): ${message}`);

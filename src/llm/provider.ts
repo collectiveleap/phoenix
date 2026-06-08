@@ -61,6 +61,13 @@ export interface GenerateOptions {
   system?: string;
   /** Abort signal — the watchdog uses this to kill a stalled call. */
   signal?: AbortSignal;
+  /**
+   * Per-call model override (G2). When set, the provider uses this model for this
+   * call instead of its constructed default — lets a single run use a capable
+   * model for the hard module and a cheaper one for simple modules. The effective
+   * model (`model ?? provider.model`) is what gets recorded in the journal/manifest.
+   */
+  model?: string;
 }
 
 export interface LLMConfig {
@@ -68,11 +75,20 @@ export interface LLMConfig {
   model: string;
   /** Override path to the `claude` CLI binary (for non-standard installs). */
   claudeCliPath?: string;
+  /**
+   * Per-role model overrides (G2), e.g. `{ "web-ui": "opus", "api": "sonnet" }`.
+   * A module's role selects its generation model; unset roles use `model`.
+   */
+  modelsByRole?: Record<string, string>;
 }
 
-/** Default models per provider. */
+/**
+ * Default models per provider. Keep current — a stale default silently generates
+ * with an out-of-date model (G3). The drift guard in `resolve.test.ts` asserts
+ * these match the intended current IDs so the next staleness fails CI, not a run.
+ */
 export const DEFAULT_MODELS: Record<string, string> = {
-  anthropic: 'claude-sonnet-4-20250514',
+  anthropic: 'claude-sonnet-4-6', // current Sonnet (was Sonnet 4.0 'claude-sonnet-4-20250514')
   openai: 'gpt-4o',
-  'claude-cli': 'sonnet',
+  'claude-cli': 'sonnet', // alias — the CLI resolves it to the latest Sonnet
 };

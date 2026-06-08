@@ -60,7 +60,7 @@ import { deriveServices, deriveInterfaces, generateScaffold } from './scaffold.j
 import { collectInspectData, renderInspectHTML, serveInspect } from './inspect.js';
 
 // LLM
-import { resolveProvider, describeAvailability, resolveProviderInfo, describeResolution } from './llm/resolve.js';
+import { resolveProvider, describeAvailability, resolveProviderInfo, describeResolution, resolveModelsByRole } from './llm/resolve.js';
 import { writeScaffoldFiles } from './harness/scaffold-writer.js';
 import type { ScaffoldWriteEntry } from './harness/scaffold-writer.js';
 import { preflight } from './harness/preflight.js';
@@ -449,6 +449,7 @@ async function cmdBootstrap(): Promise<void> {
     projectRoot,
     target: arch,
     interfaces,
+    modelsByRole: resolveModelsByRole(phoenixDir, llm?.name), // per-role model (G2)
     onProgress: (iu, status, msg) => {
       if (status === 'start') process.stdout.write(`    ⏳ ${iu.name}…`);
       else if (status === 'done') process.stdout.write(` ${green('✔')}\n`);
@@ -1141,6 +1142,13 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   const regenInterfaces = deriveInterfaces(ius, canonNodes);
 
+  // Journal + bounds make a single-module regen observable and capturable (G1/G4):
+  // the call lifecycle is recorded and a runaway is bounded + its partial output
+  // preserved — so the hard module can be reproduced and diagnosed in a minute.
+  const policy = loadPolicy(phoenixDir);
+  const regenJournal = llm ? new RunJournal(phoenixDir) : undefined;
+  regenJournal?.startRun({ command: 'regen', provider: `${llm!.name}/${llm!.model}`, ius: targetIUs.map(i => i.name) });
+
   const regenCtx: RegenContext = {
     llm: llm ?? undefined,
     canonNodes,
@@ -1148,8 +1156,14 @@ async function cmdRegen(args: string[]): Promise<void> {
     projectRoot,
     target: regenArch,
     interfaces: regenInterfaces,
+    journal: regenJournal,
+    budgets: regenJournal ? policy.budgets : undefined,
+    maxRetries: policy.maxRetries,
+    maxRepairs: policy.maxRepairs,
+    backoffMs: policy.backoffMs,
+    modelsByRole: resolveModelsByRole(phoenixDir, llm?.name), // per-role model (G2)
     onProgress: (iu, status, msg) => {
-      if (status === 'start') process.stdout.write(`  ⏳ ${iu.name}…`);
+      if (status === 'start') process.stdout.write(`  ⏳ ${msg ?? iu.name}…`);
       else if (status === 'done') process.stdout.write(` ${green('✔')}\n`);
       else if (status === 'error') process.stdout.write(` ${red('✖')} ${dim(msg || 'failed, using stub')}\n`);
     },
@@ -1157,13 +1171,36 @@ async function cmdRegen(args: string[]): Promise<void> {
 
   const manifestManager = new ManifestManager(phoenixDir);
   const results = await generateAll(targetIUs, regenCtx);
+  regenJournal?.endRun(results.some(r => r.failed) ? 'failed' : 'ok');
+
+  // Per-module diagnostic readout from the journal: output bytes, duration, stop
+  // reason, model — so the large-module behavior is visible without a full run (G1).
+  const callByTarget = new Map<string, ReturnType<RunJournal['callList']>[number]>();
+  for (const c of regenJournal?.callList() ?? []) callByTarget.set(c.target ?? '', c);
+  const readout = (iuName: string): string => {
+    const c = callByTarget.get(iuName);
+    if (!c) return '';
+    const ms = c.endedAt && c.startedAt ? c.endedAt - c.startedAt : undefined;
+    const parts = [
+      `${c.bytesStreamed} B`,
+      ms !== undefined ? `${(ms / 1000).toFixed(1)}s` : undefined,
+      c.stopReason ? `stop:${c.stopReason}` : `outcome:${c.outcome}`,
+      `model:${c.model}`,
+    ].filter(Boolean);
+    return dim(`    (${parts.join(' · ')})`);
+  };
 
   for (const result of results) {
-    // A hard-failed module (e.g. over the output-token budget) produced no
-    // usable output — write nothing and report the remediation (T3).
+    const iu = targetIUs.find(i => i.iu_id === result.iu_id);
+    const name = iu?.name || result.iu_id.slice(0, 12);
+    // A hard-failed module (over the output-token budget T3, or the generation
+    // bounds G4) produced no usable output — write nothing, report the remediation
+    // and the captured partial-output path, and exit non-zero.
     if (result.failed) {
-      const iu = targetIUs.find(i => i.iu_id === result.iu_id);
-      console.log(`  ${red('✖')} ${iu?.name || result.iu_id.slice(0, 12)}: ${dim(result.failed.remediation)}`);
+      console.log(`  ${red('✖')} ${name}: ${dim(result.failed.remediation)}`);
+      if (result.failed.partialPath) console.log(`    ${dim('captured partial output →')} ${cyan(result.failed.partialPath)}`);
+      const r = readout(name);
+      if (r) console.log(r);
       process.exitCode = 1;
       continue;
     }
@@ -1174,14 +1211,14 @@ async function cmdRegen(args: string[]): Promise<void> {
     }
     manifestManager.recordIU(result.manifest);
 
+    console.log(`  ${green('✔')} ${name}`);
+    const r = readout(name);
+    if (r) console.log(r);
     if (!llm) {
-      const iu = targetIUs.find(i => i.iu_id === result.iu_id);
-      console.log(`  ${green('✔')} ${iu?.name || result.iu_id.slice(0, 12)}`);
-      for (const [filePath] of result.files) {
-        console.log(`    → ${cyan(filePath)}`);
-      }
+      for (const [filePath] of result.files) console.log(`    → ${cyan(filePath)}`);
     }
   }
+  if (regenJournal) console.log(`  ${dim(`run: ${regenJournal.runId} — inspect with`)} ${cyan(`phoenix runs ${regenJournal.runId}`)}`);
 
   // Re-generate scaffold wiring
   const allIUs = loadIUs(phoenixDir);

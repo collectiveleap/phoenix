@@ -13,6 +13,7 @@ import { join, dirname } from 'node:path';
 import type { Clause } from '../models/clause.js';
 import type { ResolvedTarget } from '../models/architecture.js';
 import type { LLMProvider } from '../llm/provider.js';
+import { resolveModelsByRole } from '../llm/resolve.js';
 import type { ImplementationUnit } from '../models/iu.js';
 import { canonicalize } from '../canonicalizer-llm.js';
 import { planIUs, analyzePlan } from '../iu-planner.js';
@@ -217,6 +218,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       maxRetries: policy.maxRetries,
       maxRepairs: policy.maxRepairs,
       backoffMs: policy.backoffMs,
+      modelsByRole: resolveModelsByRole(phoenixDir, llm?.name), // per-role model (G2)
       onProgress: (iu, status, msg) => {
         if (status === 'done') log(`  ✔ ${iu.name}`);
         else if (status === 'error') log(`  ✖ ${iu.name}: ${msg ?? 'failed'}`);

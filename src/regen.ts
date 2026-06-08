@@ -22,7 +22,7 @@ import type { InterfaceEntry } from './scaffold.js';
 import { sha256 } from './semhash.js';
 import { probeTypechecker, typecheckProject } from './harness/typecheck.js';
 import type { TypecheckResult } from './harness/typecheck.js';
-import { recordedGenerate, TruncationError } from './observe/instrument.js';
+import { recordedGenerate, TruncationError, BoundsExceededError } from './observe/instrument.js';
 import { supervisedGenerate } from './observe/watchdog.js';
 import { isTruncationStopReason } from './llm/provider.js';
 import type { RunJournal, HealthBudgets } from './observe/journal.js';
@@ -56,10 +56,12 @@ export interface RegenResult {
   manifest: IUManifest;
   /**
    * Set when the module hard-failed and produced no usable output — e.g. its
-   * output exceeded the token budget (T3). The caller skips writing files for a
-   * failed result and reports the remediation; no stub is substituted.
+   * output exceeded the token budget (T3) or the generation bounds (G4). The
+   * caller skips writing files for a failed result and reports the remediation;
+   * no stub is substituted. `partialPath` points at the captured partial output
+   * (when any was produced) so a runaway can be inspected.
    */
-  failed?: { reason: string; remediation: string };
+  failed?: { reason: string; remediation: string; partialPath?: string };
 }
 
 export interface RegenContext {
@@ -87,6 +89,12 @@ export interface RegenContext {
   backoffMs?: number;
   /** Output-token budget for generation calls. Default GENERATE_MAX_TOKENS. */
   maxTokens?: number;
+  /**
+   * Per-role model overrides (G2), e.g. `{ 'web-ui': 'opus', 'api': 'sonnet' }`.
+   * A module's role (from `interfaces`) selects the model for its generation
+   * calls; unset roles fall back to the provider's default model.
+   */
+  modelsByRole?: Record<string, string>;
   /** Callback for progress reporting. */
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
 }
@@ -97,28 +105,48 @@ export interface RegenContext {
  */
 export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Promise<RegenResult> {
   const files = new Map<string, string>();
-  const modelId = ctx?.llm ? `${ctx.llm.name}/${ctx.llm.model}` : 'stub-generator/1.0';
+  // Effective model = per-role override (G2) or the provider's default — recorded
+  // in the manifest so you can see which model produced which module.
+  const modelOverride = ctx ? pickModelForIU(iu, ctx) : undefined;
+  const effectiveModel = modelOverride ?? ctx?.llm?.model;
+  const modelId = ctx?.llm ? `${ctx.llm.name}/${effectiveModel}` : 'stub-generator/1.0';
 
   for (const outputPath of iu.output_files) {
     let content: string;
 
     if (ctx?.llm && ctx.canonNodes) {
-      ctx.onProgress?.(iu, 'start', `Generating ${iu.name} via ${ctx.llm.name}…`);
+      ctx.onProgress?.(iu, 'start', `Generating ${iu.name} via ${ctx.llm.name}/${effectiveModel}…`);
       try {
         content = await generateWithLLM(iu, ctx);
         ctx.onProgress?.(iu, 'done');
       } catch (err) {
+        // A generation-bounds runaway (G4) is deterministic-enough and was already
+        // captured — hard-fail with the partial output preserved, never a stub.
+        if (err instanceof BoundsExceededError) {
+          const partialPath = writePartial(ctx, iu, outputPath, err.partialText);
+          const remediation =
+            `${iu.name} exceeded the generation ${err.bound} bound ` +
+            `(${err.bytes} B, ${err.elapsedMs} ms) — likely a runaway. Inspect the captured output` +
+            `${partialPath ? ` at ${partialPath}` : ''}, narrow the spec section, or try a more capable model.`;
+          ctx.onProgress?.(iu, 'error', remediation);
+          ctx.journal?.event('module_failed', {
+            iu: iu.name, reason: 'over_generation_bounds', bound: err.bound, remediation, partialPath,
+          });
+          return failedResult(iu, modelId, 'over_generation_bounds', remediation, partialPath);
+        }
         // Over budget (truncation) is deterministic — hard-fail the module with
         // a remediation rather than retrying or substituting a stub (T3).
         if (err instanceof OutputBudgetExceededError || err instanceof TruncationError) {
           const e = err instanceof OutputBudgetExceededError
             ? err
             : new OutputBudgetExceededError(iu.name, ctx.maxTokens ?? GENERATE_MAX_TOKENS);
+          const partialText = err instanceof TruncationError ? err.partialText : undefined;
+          const partialPath = partialText ? writePartial(ctx, iu, outputPath, partialText) : undefined;
           ctx.onProgress?.(iu, 'error', e.remediation);
           ctx.journal?.event('module_failed', {
-            iu: iu.name, reason: 'over_output_budget', remediation: e.remediation,
+            iu: iu.name, reason: 'over_output_budget', remediation: e.remediation, partialPath,
           });
-          return failedResult(iu, modelId, e.remediation);
+          return failedResult(iu, modelId, 'over_output_budget', e.remediation, partialPath);
         }
         const msg = err instanceof Error ? err.message : String(err);
         ctx.onProgress?.(iu, 'error', msg);
@@ -165,10 +193,27 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
 }
 
 /**
+ * Pick the model for an IU's generation calls (G2): the per-role override from
+ * `ctx.modelsByRole` keyed by the module's role (from the interface registry),
+ * or undefined to use the provider's default model.
+ */
+function pickModelForIU(iu: ImplementationUnit, ctx: RegenContext): string | undefined {
+  if (!ctx.modelsByRole) return undefined;
+  const role = ctx.interfaces?.find(e => e.iu_id === iu.iu_id)?.role;
+  return role ? ctx.modelsByRole[role] : undefined;
+}
+
+/**
  * Build a hard-failed RegenResult: no files, a marker manifest, and the
  * remediation. The caller writes nothing for this IU and reports the failure.
  */
-function failedResult(iu: ImplementationUnit, modelId: string, remediation: string): RegenResult {
+function failedResult(
+  iu: ImplementationUnit,
+  modelId: string,
+  reason: string,
+  remediation: string,
+  partialPath?: string,
+): RegenResult {
   const metadata: RegenMetadata = {
     model_id: modelId,
     promptpack_hash: sha256(JSON.stringify(iu.contract)),
@@ -179,8 +224,32 @@ function failedResult(iu: ImplementationUnit, modelId: string, remediation: stri
     iu_id: iu.iu_id,
     files: new Map(),
     manifest: { iu_id: iu.iu_id, iu_name: iu.name, files: {}, regen_metadata: metadata },
-    failed: { reason: 'over_output_budget', remediation },
+    failed: { reason, remediation, partialPath },
   };
+}
+
+/**
+ * Persist the partial output of a failed/bounded generation so a runaway can be
+ * inspected (G1/G4). Writes under the run's `partial/` dir when a journal is
+ * present, else next to the intended output file as `<output>.partial`. Returns
+ * the path written, or undefined if there was nothing to write.
+ */
+function writePartial(ctx: RegenContext, iu: ImplementationUnit, outputPath: string, text: string): string | undefined {
+  if (!text || text.length === 0) return undefined;
+  const base = `${outputPath.replace(/[\\/]/g, '__')}.partial`;
+  const dest = ctx.journal
+    ? join(ctx.journal.dir, 'partial', base)
+    : ctx.projectRoot
+      ? join(ctx.projectRoot, `${outputPath}.partial`)
+      : undefined;
+  if (!dest) return undefined;
+  try {
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, text, 'utf8');
+    return dest;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -269,13 +338,14 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   const maxRetries = ctx.maxRetries ?? 0;
   const backoffMs = ctx.backoffMs ?? 0;
   const maxTokens = ctx.maxTokens ?? GENERATE_MAX_TOKENS;
+  const model = pickModelForIU(iu, ctx); // per-role model override (G2); undefined ⇒ provider default
 
   const generateOnce = async (): Promise<string> => {
     if (template) {
-      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens }, 0);
+      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens, model }, 0);
       return assembleFromTemplate(template, raw, iu);
     }
-    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens }, 0));
+    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens, model }, 0));
   };
 
   let code: string;
@@ -284,9 +354,10 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       code = await generateOnce();
       break;
     } catch (err) {
-      // Truncation is deterministic — retrying hits the identical ceiling. Do not
-      // count it toward maxRetries; surface it immediately as over-budget (T3).
-      if (err instanceof TruncationError) throw err;
+      // Truncation (T3) and a bounds runaway (G4) are deterministic — retrying
+      // hits the same ceiling/runaway. Do not count them toward maxRetries;
+      // surface immediately so the module hard-fails with the captured evidence.
+      if (err instanceof TruncationError || err instanceof BoundsExceededError) throw err;
       if (genAttempt >= maxRetries) throw err;
       journal?.event('generate_retry', {
         iu: iu.name,
@@ -340,7 +411,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
         // Feed errors back to the LLM with the current code.
         const fixResponse = await callLLM(
           buildFixPrompt(code, result.errors),
-          { system: systemPrompt, temperature: 0.1, maxTokens },
+          { system: systemPrompt, temperature: 0.1, maxTokens, model },
           attempt + 1,
         );
         code = template ? assembleFromTemplate(template, fixResponse, iu) : cleanCodeResponse(fixResponse);

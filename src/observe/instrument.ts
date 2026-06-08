@@ -38,6 +38,30 @@ export class TruncationError extends Error {
   }
 }
 
+/**
+ * A generation aborted because it exceeded Phoenix's own generation bounds — the
+ * wall-clock or byte budget (G4). This is the runaway case: claude-cli ignores
+ * CLAUDE_CODE_MAX_OUTPUT_TOKENS, so without a Phoenix-side bound a large module
+ * streams unbounded for many minutes then stalls. Carried as the AbortSignal's
+ * `reason` by the watchdog and re-thrown here with the captured partial output,
+ * so the caller hard-fails it (no retry, no stub) and can inspect what was
+ * produced. `partialText` is filled in by `recordedGenerate` at abort time.
+ */
+export class BoundsExceededError extends Error {
+  readonly bound: 'duration' | 'bytes';
+  readonly bytes: number;
+  readonly elapsedMs: number;
+  partialText: string;
+  constructor(bound: 'duration' | 'bytes', bytes: number, elapsedMs: number) {
+    super(`Generation exceeded the ${bound} budget (${bytes} B, ${elapsedMs} ms)`);
+    this.name = 'BoundsExceededError';
+    this.bound = bound;
+    this.bytes = bytes;
+    this.elapsedMs = elapsedMs;
+    this.partialText = '';
+  }
+}
+
 /** Optional observers around a recorded generation. */
 export interface RecordHooks {
   /** Called with the journal callId once the call is opened (for the watchdog). */
@@ -67,19 +91,21 @@ export async function recordedGenerate(
     target: ctx.target,
     attempt: ctx.attempt,
     provider: provider.name,
-    model: provider.model,
+    model: options?.model ?? provider.model, // effective per-call model (G2)
     promptBytes: Buffer.byteLength(prompt, 'utf8'),
   });
   hooks?.onCallStart?.(callId);
 
   let lastBytes = 0;
   let stopReason: string | undefined;
+  let partial = ''; // accumulated output text, so a killed/bounded call still yields what was produced (G4)
 
   try {
     const text = await provider.generateStream(prompt, options, {
       onFirstByte: () => journal.firstByte(callId),
-      onChunk: (total) => {
+      onChunk: (total, delta) => {
         lastBytes = total;
+        partial += delta ?? '';
         journal.progress(callId, total);
       },
       onStreamEnd: () => journal.streamEnd(callId),
@@ -98,7 +124,19 @@ export async function recordedGenerate(
     return text;
   } catch (err) {
     if (err instanceof TruncationError) throw err; // already recorded above
+
+    // A generation-bounds abort (G4): the watchdog set the abort reason. Record it
+    // as `over_budget` (distinct from a stall's `timeout`) and re-throw with the
+    // captured partial output for inspection.
+    const reason = options?.signal?.aborted ? options.signal.reason : undefined;
+    if (reason instanceof BoundsExceededError) {
+      reason.partialText = partial;
+      journal.endCall(callId, { outcome: 'over_budget', bytesStreamed: lastBytes, errorText: reason.message });
+      throw reason;
+    }
+
     const message = err instanceof Error ? err.message : String(err);
+    if (err && typeof err === 'object') (err as { partialText?: string }).partialText = partial;
     journal.endCall(callId, {
       outcome: outcomeForError(message),
       bytesStreamed: lastBytes,
@@ -125,7 +163,7 @@ export async function recordPlainGenerate(
     target: ctx.target,
     attempt: ctx.attempt,
     provider: provider.name,
-    model: provider.model,
+    model: options?.model ?? provider.model, // effective per-call model (G2)
     promptBytes: Buffer.byteLength(prompt, 'utf8'),
   });
   try {

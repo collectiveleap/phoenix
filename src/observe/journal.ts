@@ -20,8 +20,12 @@ import { join } from 'node:path';
  * - `truncated`: completed-but-truncated — the model hit the output-token budget
  *   (`stop_reason: max_tokens`). Distinct from a stall/timeout: the call returned,
  *   it just ran out of budget. Deterministic, so it is not retried (T2/T3).
+ * - `over_budget`: the call exceeded Phoenix's own generation bounds (wall-clock
+ *   or byte budget) and was aborted — the runaway case where the provider's cap
+ *   is unenforced (G4). Distinct from `timeout` (a stall): the call was actively
+ *   producing, just past the budget. Deterministic, so it is not retried.
  */
-export type CallOutcome = 'ok' | 'timeout' | 'error' | 'empty' | 'truncated';
+export type CallOutcome = 'ok' | 'timeout' | 'error' | 'empty' | 'truncated' | 'over_budget';
 
 /**
  * Health of a call, derivable from records alone (O1).
@@ -36,6 +40,7 @@ export type CallHealth =
   | 'startup-stalled'
   | 'stream-stalled'
   | 'returned-then-wedged'
+  | 'exceeded-bounds'
   | 'completed'
   | 'failed';
 
@@ -47,12 +52,23 @@ export interface HealthBudgets {
   streamStallMs: number;
   /** Max ms after stream end with no finalization before returned-then-wedged. */
   wedgeMs: number;
+  /**
+   * Max total wall-clock ms a single call may run before it is `exceeded-bounds`
+   * (G4). Bounds a *steadily-streaming* runaway that the stall budgets miss —
+   * needed because claude-cli ignores CLAUDE_CODE_MAX_OUTPUT_TOKENS and can run
+   * unbounded. Omit/0 to disable.
+   */
+  maxDurationMs?: number;
+  /** Max total streamed bytes before `exceeded-bounds` (G4). Omit/0 to disable. */
+  maxBytes?: number;
 }
 
 export const DEFAULT_BUDGETS: HealthBudgets = {
   startupMs: 60_000,
   streamStallMs: 45_000,
   wedgeMs: 30_000,
+  maxDurationMs: 300_000, // 5 min — a generation past this is a runaway, not work
+  maxBytes: 262_144,      // 256 KB ≈ 8× the 29 KB reference web-experience module
 };
 
 /** Reconstructable record of one LLM call. */
@@ -302,6 +318,13 @@ export class RunJournal {
     // A truncation (over budget) is a resolved call, not a stall — terminal.
     if (rec.outcome === 'truncated') return 'completed';
     if (rec.endedAt !== undefined) return 'failed';
+
+    // Generation bounds (G4) — checked BEFORE the stall budgets so a runaway that
+    // is *still streaming* (never silent) is caught. claude-cli ignores the output
+    // cap, so without this a runaway only trips a stall budget after it finally
+    // goes silent — minutes/hundreds-of-KB too late.
+    if (budgets.maxDurationMs && at - rec.startedAt > budgets.maxDurationMs) return 'exceeded-bounds';
+    if (budgets.maxBytes && rec.bytesStreamed > budgets.maxBytes) return 'exceeded-bounds';
 
     // Stream finished but the call never finalized → caller is wedged.
     if (rec.streamEndedAt !== undefined) {

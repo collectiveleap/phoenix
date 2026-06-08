@@ -189,6 +189,26 @@ function saveConfig(phoenixDir: string, config: PhoenixConfig): void {
 }
 
 /**
+ * Resolve per-role model overrides (G2): default → saved config → env. The
+ * default applies only to `claude-cli`, whose `opus`/`sonnet` aliases are valid
+ * `--model` values (an alias would be rejected by the raw Anthropic/OpenAI APIs,
+ * so those providers get no default and use the resolved model unless explicitly
+ * configured). Precedence: env > config > default.
+ */
+export function resolveModelsByRole(phoenixDir?: string, providerName?: string | null): Record<string, string> {
+  const config = phoenixDir ? loadConfig(phoenixDir) : {};
+  const result: Record<string, string> = {};
+  if (providerName === 'claude-cli') {
+    result['web-ui'] = 'opus';   // the hard module gets the most capable model
+    result['api'] = 'sonnet';    // CRUD/API modules stay on the fast workhorse
+  }
+  if (config.llm?.modelsByRole) Object.assign(result, config.llm.modelsByRole);
+  if (process.env.PHOENIX_LLM_MODEL_WEBUI) result['web-ui'] = process.env.PHOENIX_LLM_MODEL_WEBUI;
+  if (process.env.PHOENIX_LLM_MODEL_API) result['api'] = process.env.PHOENIX_LLM_MODEL_API;
+  return result;
+}
+
+/**
  * Describe which providers are available (for CLI help).
  */
 export function describeAvailability(): { available: string[]; configured: string | null; hint: string } {

@@ -27,7 +27,7 @@ export class AnthropicProvider implements LLMProvider {
 
   async generateStream(prompt: string, options?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: options?.model ?? this.model, // per-call model override (G2)
       max_tokens: options?.maxTokens ?? 8192,
       messages: [{ role: 'user', content: prompt }],
       stream: true,

@@ -253,7 +253,8 @@ export class ClaudeCliProvider implements LLMProvider {
   generateStream(prompt: string, options?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
     const args = [
       '-p',
-      '--model', this.model,
+      // Per-call model override (G2) falls back to the provider's default.
+      '--model', options?.model ?? this.model,
       '--tools', '',
       '--no-session-persistence',
       // stream-json (requires --verbose in -p mode) emits output as it is

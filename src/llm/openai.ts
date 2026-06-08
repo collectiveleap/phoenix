@@ -33,7 +33,7 @@ export class OpenAIProvider implements LLMProvider {
     messages.push({ role: 'user', content: prompt });
 
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: options?.model ?? this.model, // per-call model override (G2)
       messages,
       max_tokens: options?.maxTokens ?? 8192,
       stream: true,

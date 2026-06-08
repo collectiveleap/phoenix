@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveProviderInfo, describeResolution } from '../../src/llm/resolve.js';
+import { DEFAULT_MODELS } from '../../src/llm/provider.js';
 
 describe('Provider/config resolution (O6: state choice + source, warn on conflict)', () => {
   const saved = { ...process.env };
@@ -55,5 +56,18 @@ describe('Provider/config resolution (O6: state choice + source, warn on conflic
     const info = resolveProviderInfo(phoenixDir);
     expect(info.available).toEqual(expect.arrayContaining(['anthropic', 'openai']));
     expect(info.conflicts.join(' ')).toMatch(/Multiple providers available/);
+  });
+});
+
+describe('Default model drift guard (G3: defaults must stay current, not stale)', () => {
+  // Update these intentionally when bumping the shipped defaults — a failure here
+  // means a default silently drifted out of date (e.g. the old Sonnet 4.0 pin).
+  it('ships the intended current provider defaults', () => {
+    expect(DEFAULT_MODELS.anthropic).toBe('claude-sonnet-4-6');
+    expect(DEFAULT_MODELS['claude-cli']).toBe('sonnet');
+  });
+
+  it('does not ship the known-stale Sonnet 4.0 pin', () => {
+    expect(DEFAULT_MODELS.anthropic).not.toBe('claude-sonnet-4-20250514');
   });
 });
