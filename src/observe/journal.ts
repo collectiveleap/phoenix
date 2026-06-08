@@ -330,11 +330,17 @@ export class RunJournal {
     if (rec.streamEndedAt !== undefined) {
       return at - rec.streamEndedAt > budgets.wedgeMs ? 'returned-then-wedged' : 'healthy';
     }
-    // No first byte yet.
+    // No parsed first-content token yet. Liveness is BYTE GROWTH, not elapsed time
+    // (W1): a call still receiving output bytes is healthy regardless of how slow
+    // its first parsed token is — e.g. a large stream-json assistant message is one
+    // long line, so `ttfbAt` (set on the first parsed text) doesn't fire until the
+    // whole SPA has streamed, while `lastByteAt` advances on every chunk. Measuring
+    // from `startedAt` here latched `startup-stalled` and killed calls mid-stream.
+    // Only a call with no byte growth for the startup budget is genuinely stalled.
     if (rec.ttfbAt === undefined) {
-      return at - rec.startedAt > budgets.startupMs ? 'startup-stalled' : 'healthy';
+      return at - (rec.lastByteAt ?? rec.startedAt) > budgets.startupMs ? 'startup-stalled' : 'healthy';
     }
-    // First byte seen — check for stream silence.
+    // First content seen — check for stream silence (byte growth) the same way.
     const sinceLastByte = at - (rec.lastByteAt ?? rec.ttfbAt);
     return sinceLastByte > budgets.streamStallMs ? 'stream-stalled' : 'healthy';
   }
