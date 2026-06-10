@@ -10,6 +10,7 @@ import { checkInterfaceContracts } from '../../src/harness/contract-check.js';
 import { restDialect } from '../../src/architectures/dialects/rest.js';
 import { makeContract } from '../../src/models/interface-contract.js';
 import type { ImplementationUnit } from '../../src/models/iu.js';
+import type { CanonicalNode } from '../../src/models/canonical.js';
 import type { InterfaceEntry } from '../../src/scaffold.js';
 
 const STORE_FILE = 'src/generated/app/outliner-store.ts';
@@ -66,5 +67,31 @@ describe('C3: cross-module contract check', () => {
     const r = checkInterfaceContracts(root, [storeIU, webIU], interfaces(), undefined);
     expect(r.ok).toBe(true);
     expect(r.checked).toBe(0);
+  });
+
+  // P1.1 / R2 headline: the spec-correct append-only store (list + append only) now
+  // PASSES conformance — before the fix the CRUD-template contract demanded
+  // get/update/remove and failed it.
+  it('an append-only store (spec-derived list+append) conforms — no demand for get/update/remove', () => {
+    const canon = [
+      { canon_id: 'a', statement: 'the store must return all operations in seq order' },
+      { canon_id: 'b', statement: 'the store must validate and append an operation' },
+    ] as unknown as CanonicalNode[];
+    const appendStore = {
+      iu_id: 's', name: 'Outliner Store', output_files: [STORE_FILE], source_canon_ids: ['a', 'b'],
+      contract: { description: 'append-only log of operations', inputs: [], outputs: [],
+        invariants: ['the store must never modify or remove a logged operation; the log only ever grows'] },
+    } as unknown as ImplementationUnit;
+    const ops = restDialect.deriveOperations(appendStore, canon); // → list + create only
+    expect(ops.map(o => o.name)).toEqual(['list', 'create']);
+    const ifaces: InterfaceEntry[] = [
+      { iu_id: 's', name: 'Outliner Store', mount_path: '/outliner-store', role: 'api', resource_fields: '', contract: makeContract('s', 'Outliner Store', ops, '') },
+      { iu_id: 'w', name: 'Web Experience', mount_path: '', role: 'web-ui', resource_fields: '' },
+    ];
+    write(STORE_FILE, `router.get('/', c=>{}); router.post('/', async c=>{});`); // append-only provider
+    write(WEB_FILE, `await fetch('/outliner-store'); await fetch('/outliner-store', { method: 'POST' });`);
+    const r = checkInterfaceContracts(root, [appendStore, webIU], ifaces, restDialect, { checkProviders: true });
+    expect(r.ok).toBe(true);
+    expect(r.violations).toHaveLength(0);
   });
 });

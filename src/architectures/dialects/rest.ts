@@ -66,17 +66,67 @@ function resolveBase(base: string, contracts: InterfaceContract[]): InterfaceCon
   return bestScore > 0 ? best : null;
 }
 
+/** The CRUD-shaped capabilities a REST contract can expose, in canonical order. */
+type Capability = 'list' | 'create' | 'get' | 'update' | 'remove';
+const CAPABILITY_ORDER: Capability[] = ['list', 'create', 'get', 'update', 'remove'];
+
+/**
+ * Verbs that declare each capability. Detection is over the module's *positive*
+ * behaviors (what it does), and is **negation-aware** — "must never modify or
+ * remove" declares nothing, so an append-only store yields list+create, not
+ * update/remove. The contract is the API surface; how a mutation is implemented
+ * (in-place / append / tombstone) is the provider's concern, not the contract's.
+ */
+const CAPABILITY_VERBS: Record<Capability, RegExp> = {
+  list: /\b(list|index|enumerate|query|return all|returns all|get all|fetch all|all (?:the )?\w+s\b)\b/,
+  create: /\b(create|add|append|insert|log|record|store|submit|register|post)\b/,
+  // get-one needs an id/singular context so "get all" / "list" don't trip it.
+  get: /\b(get|read|retrieve|fetch|view|show|look ?up)\b[^.;]*\b(by id|by its|by the|single|one|specific)\b/,
+  update: /\b(update|modify|edit|change|patch|rename|replace)\b/,
+  remove: /\b(delete|remove|destroy|purge|drop)\b/,
+};
+const NEGATION = /\b(never|not|no|cannot|can't|must not|may not|won't|shall not)\b/;
+
+/**
+ * Derive the CRUD capabilities a module *declares*, from its behavior statements.
+ * A capability is included iff one of its verbs appears in a non-negated clause.
+ * Falls back to full CRUD when nothing is detected (sparse/empty spec) so a spec
+ * that doesn't enumerate operations keeps today's behavior — narrowing happens
+ * only when the spec actually declares a subset.
+ */
+export function declaredCrudCapabilities(iu: ImplementationUnit, canonNodes: CanonicalNode[]): Capability[] {
+  const own = canonNodes.filter(n => iu.source_canon_ids?.includes(n.canon_id));
+  const statements = [
+    iu.contract?.description ?? '',
+    ...own.map(n => n.statement),
+    ...(iu.contract?.invariants ?? []),
+  ];
+  // Clause-level scan so a negation only suppresses verbs in its own clause.
+  const clauses = statements.flatMap(s => s.toLowerCase().split(/[.;,\n]/)).filter(Boolean);
+  const found = new Set<Capability>();
+  for (const cap of CAPABILITY_ORDER) {
+    const verb = CAPABILITY_VERBS[cap];
+    for (const clause of clauses) {
+      if (verb.test(clause) && !NEGATION.test(clause)) { found.add(cap); break; }
+    }
+  }
+  if (found.size === 0) return [...CAPABILITY_ORDER]; // nothing declared → full CRUD (no regression)
+  return CAPABILITY_ORDER.filter(c => found.has(c));
+}
+
 export const restDialect: InterfaceDialect = {
-  deriveOperations(iu: ImplementationUnit, _canonNodes: CanonicalNode[]): OperationSpec[] {
+  deriveOperations(iu: ImplementationUnit, canonNodes: CanonicalNode[]): OperationSpec[] {
     const mount = mountForName(iu.name);
     const a = (method: RestAddress['method'], path: string): RestAddress => ({ method, path });
-    return [
-      { name: 'list', purpose: 'list all', address: a('GET', mount) },
-      { name: 'create', purpose: 'create one', address: a('POST', mount) },
-      { name: 'get', purpose: 'get one by id', address: a('GET', `${mount}/:id`) },
-      { name: 'update', purpose: 'update one by id', address: a('PATCH', `${mount}/:id`) },
-      { name: 'remove', purpose: 'delete one by id', address: a('DELETE', `${mount}/:id`) },
-    ];
+    const spec: Record<Capability, OperationSpec> = {
+      list: { name: 'list', purpose: 'list all', address: a('GET', mount) },
+      create: { name: 'create', purpose: 'create/append one', address: a('POST', mount) },
+      get: { name: 'get', purpose: 'get one by id', address: a('GET', `${mount}/:id`) },
+      update: { name: 'update', purpose: 'update one by id', address: a('PATCH', `${mount}/:id`) },
+      remove: { name: 'remove', purpose: 'delete one by id', address: a('DELETE', `${mount}/:id`) },
+    };
+    // Operations come from the module's declared behaviors, not a fixed CRUD set.
+    return declaredCrudCapabilities(iu, canonNodes).map(c => spec[c]);
   },
 
   describeForPrompt(contract: InterfaceContract): string {
@@ -91,16 +141,25 @@ export const restDialect: InterfaceDialect = {
 
   generateClient(contracts: InterfaceContract[]): Record<string, string> {
     if (contracts.length === 0) return {};
+    // Typed method per declared operation (params from the op shape) so the
+    // generated "do not edit" file passes the strict tsconfig Phoenix writes —
+    // and only the operations the contract actually declares are emitted.
+    const JSON_HDR = `{ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }`;
+    const method = (mount: string, opName: string): string | null => {
+      switch (opName) {
+        case 'list':   return `    list: (): Promise<unknown> => fetch('${mount}').then(r => r.json()),`;
+        case 'create': return `    create: (body: unknown): Promise<unknown> => fetch('${mount}', ${JSON_HDR}).then(r => r.json()),`;
+        case 'get':    return `    get: (id: string): Promise<unknown> => fetch(\`${mount}/\${id}\`).then(r => r.json()),`;
+        case 'update': return `    update: (id: string, body: unknown): Promise<unknown> => fetch(\`${mount}/\${id}\`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),`;
+        case 'remove': return `    remove: (id: string): Promise<unknown> => fetch(\`${mount}/\${id}\`, { method: 'DELETE' }).then(r => r.json()),`;
+        default:       return null;
+      }
+    };
     const blocks = contracts.map(c => {
       const mount = mountOfContract(c);
       const key = c.identity.replace(/[^a-zA-Z0-9]+(.)?/g, (_, ch) => (ch ? ch.toUpperCase() : ''));
-      return `  ${key}: {
-    list: () => fetch('${mount}').then(r => r.json()),
-    create: (body) => fetch('${mount}', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
-    get: (id) => fetch(\`${mount}/\${id}\`).then(r => r.json()),
-    update: (id, body) => fetch(\`${mount}/\${id}\`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
-    remove: (id) => fetch(\`${mount}/\${id}\`, { method: 'DELETE' }).then(r => r.json()),
-  },`;
+      const methods = c.operations.map(o => method(mount, o.name)).filter(Boolean).join('\n');
+      return `  ${key}: {\n${methods}\n  },`;
     });
     const content = `/** @internal Phoenix VCS — generated API client (interface contract). Do not edit. */
 export const api = {
