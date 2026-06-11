@@ -36,13 +36,18 @@ const DB_FILE = `import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const DB_PATH = process.env.DB_PATH ?? 'data/app.db';
+// Under vitest the suite uses an isolated in-memory database, so test collection can
+// never depend on whether \`data/app.db\` already exists or was just reset; the app and
+// the acceptance boot still use the file database.
+const DB_PATH = process.env.DB_PATH ?? (process.env.VITEST ? ':memory:' : 'data/app.db');
 
-const dir = dirname(DB_PATH);
-if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+if (DB_PATH !== ':memory:') {
+  const dir = dirname(DB_PATH);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
 
 const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+if (DB_PATH !== ':memory:') db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 const migrations: Array<{ name: string; sql: string }> = [];
@@ -223,6 +228,9 @@ default-exported Hono app/router — never its internals. Derive every assertion
 - The test file lives in \`__tests__/\` — ONE directory deeper than the module — so shared-file imports need
   one more \`../\` than the module uses. If the module uses the database, \`import { runMigrations } from
   '../../../db.js'\` and call it in \`beforeAll(() => runMigrations())\` so the schema exists.
+- Touch the database ONLY inside \`beforeAll\`/\`it\` — never at module or \`describe()\` top level. The schema
+  exists only after \`runMigrations()\`, so a top-level query throws during collection and the whole file
+  registers as 0 tests instead of a named failure.
 - Assert HTTP status codes and JSON response shapes for each requirement (successful create → 201 with the
   assigned id/seq; a validation failure → 400 with an error; a list → 200 with an array in order).
 - One \`it()\` per behavior. Import ONLY vitest and the module under test — no external packages.
