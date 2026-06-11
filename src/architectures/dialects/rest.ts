@@ -66,6 +66,24 @@ function resolveBase(base: string, contracts: InterfaceContract[]): InterfaceCon
   return bestScore > 0 ? best : null;
 }
 
+/** Map `const/let/var NAME = '/path'` declarations to their literal URL (#6). */
+function urlVarDecls(code: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /(?:const|let|var)\s+(\w+)\s*=\s*['"`](\/[^'"`]+)['"`]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code)) !== null) out[m[1]] = m[2];
+  return out;
+}
+
+/** Identifiers used as the target of a `fetch(...)` call (incl. `fetch(`${NAME}…`)`) (#6). */
+function fetchedIdents(code: string): Set<string> {
+  const out = new Set<string>();
+  const re = /fetch\(\s*`?\$?\{?\s*(\w+)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code)) !== null) out.add(m[1]);
+  return out;
+}
+
 /** The CRUD-shaped capabilities a REST contract can expose, in canonical order. */
 type Capability = 'list' | 'create' | 'get' | 'update' | 'remove';
 const CAPABILITY_ORDER: Capability[] = ['list', 'create', 'get', 'update', 'remove'];
@@ -183,19 +201,33 @@ ${blocks.join('\n')}
     code = code.replace(/fetch\(\s*(['"])(\/[^'"]+)\1/g, (m, q, url) => `fetch(${q}${rewrite(url)}${q}`);
     // fetch(`/x/${id}`) — rewrite only the leading literal base
     code = code.replace(/fetch\(\s*`(\/[^`]+)`/g, (m, url) => `fetch(\`${rewrite(url)}\``);
+    // Variable-held store URL used via fetch(NAME): rewrite the declaration so the
+    // page's real target binds to the provider mount (#6) — a bare `var STORE='/operations'`
+    // that fetch() then uses is otherwise invisible to the literal-only rewrites above.
+    const fetched = fetchedIdents(code);
+    if (fetched.size > 0) {
+      code = code.replace(
+        /((?:const|let|var)\s+(\w+)\s*=\s*(['"`]))(\/[^'"`]+)(\3)/g,
+        (full, pre, name, _q, url, close) => (fetched.has(name) ? `${pre}${rewrite(url)}${close}` : full),
+      );
+    }
     return code;
   },
 
   extractConsumerCalls(code: string, contracts: InterfaceContract[]): OpRef[] {
     const refs: OpRef[] = [];
-    const re = /fetch\(\s*['"`](\/[^'"`]+)['"`]/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(code)) !== null) {
-      const raw = m[1];
-      const base = basePath(raw);
-      const target = contracts.find(c => mountOfContract(c) === base);
+    const add = (raw: string) => {
+      const target = contracts.find(c => mountOfContract(c) === basePath(raw));
       refs.push({ raw, name: target ? target.identity : null });
-    }
+    };
+    // Literal fetch('/x') / fetch(`/x/${id}`)
+    const lit = /fetch\(\s*['"`](\/[^'"`]+)['"`]/g;
+    let m: RegExpExecArray | null;
+    while ((m = lit.exec(code)) !== null) add(m[1]);
+    // fetch(NAME) where NAME holds a URL — the page's real target via indirection (#6),
+    // which the literal regex misses; validate it so an invented `/operations` can't pass.
+    const vars = urlVarDecls(code);
+    for (const name of fetchedIdents(code)) if (vars[name]) add(vars[name]);
     return refs;
   },
 

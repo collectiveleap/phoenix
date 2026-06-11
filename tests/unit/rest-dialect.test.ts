@@ -67,6 +67,14 @@ describe('REST dialect: bindConsumer auto-repair (the outliner 404 fix)', () => 
     expect(fixed).toContain('fetch(`/outliner-store/${id}`)');
     expect(fixed).toContain(`fetch('/outliner-store')`);
   });
+
+  it('rewrites a variable-held invented URL used via fetch(VAR) (#6)', () => {
+    // The bypass shape: the page hand-rolls `var STORE = '/operations'` then `fetch(STORE)`.
+    const code = `var STORE = '/operations';\nasync function load() { return fetch(STORE).then(r => r.json()); }`;
+    const fixed = restDialect.bindConsumer(code, [storeContract()]);
+    expect(fixed).toContain(`var STORE = '/outliner-store'`);
+    expect(fixed).not.toContain(`'/operations'`);
+  });
 });
 
 describe('REST dialect: extract for the contract check (C3)', () => {
@@ -75,6 +83,14 @@ describe('REST dialect: extract for the contract check (C3)', () => {
     const refs = restDialect.extractConsumerCalls(code, [storeContract()]);
     expect(refs.find(r => r.raw === '/outliner-store')?.name).toBe('Outliner Store');
     expect(refs.find(r => r.raw === '/totally-unknown')?.name).toBeNull();
+  });
+
+  it('resolves a fetch via a URL variable and flags an invented one (#6)', () => {
+    // The static check must see the page's REAL target, not just literal fetch() args.
+    const bad = `var STORE = '/operations';\nfetch(STORE);`;
+    expect(restDialect.extractConsumerCalls(bad, [storeContract()]).find(r => r.raw === '/operations')?.name).toBeNull();
+    const good = `const STORE = '/outliner-store';\nfetch(STORE);`;
+    expect(restDialect.extractConsumerCalls(good, [storeContract()]).find(r => r.raw === '/outliner-store')?.name).toBe('Outliner Store');
   });
 
   it('extracts provider routes and matches them to contract operations', () => {
