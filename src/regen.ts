@@ -11,7 +11,7 @@
  */
 
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, posix as posixPath } from 'node:path';
 import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
@@ -169,9 +169,13 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     if (entry?.role === 'api' && entry.contract && out) {
       const dir = out.split('/').slice(0, -1).join('/');
       const base = out.split('/').pop()!.replace(/\.ts$/, '');
-      const testCode = await generateTestsWithLLM(iu, ctx, `../${base}.js`, entry.contract);
-      if (testCode) {
-        files.set(`${dir}/__tests__/${base}.behavior.test.ts`, testCode);
+      const raw = await generateTestsWithLLM(iu, ctx, `../${base}.js`, entry.contract);
+      if (raw) {
+        const testPath = `${dir}/__tests__/${base}.behavior.test.ts`;
+        // Fix shared-file import depth for the __tests__/ location (I1), regardless
+        // of what the model emitted.
+        const testCode = rebaseTestImports(raw, testPath, Object.keys(ctx.target.runtime.sharedFiles ?? {}));
+        files.set(testPath, testCode);
         ctx.journal?.event('behavioral_tests', { iu: iu.name, module: base });
       }
     }
@@ -227,6 +231,29 @@ function pickModelForIU(iu: ImplementationUnit, ctx: RegenContext): string | und
   if (!ctx.modelsByRole) return undefined;
   const role = ctx.interfaces?.find(e => e.iu_id === iu.iu_id)?.role;
   return role ? ctx.modelsByRole[role] : undefined;
+}
+
+/**
+ * Re-base shared-file imports in a generated test to the test file's own location
+ * (I1). The test lives in `__tests__/` — one level deeper than the module — so a
+ * shared-file import the model copied from the module (e.g. `../../db.js`) resolves
+ * one directory too high. Rewrite every relative import whose final segment is an
+ * architecture shared file to the path correct for the test, regardless of the
+ * depth the model emitted. Deterministic; never relies on the model's path math.
+ */
+function rebaseTestImports(code: string, testPath: string, sharedFiles: string[]): string {
+  const testDir = posixPath.dirname(testPath);
+  for (const sf of sharedFiles) {
+    const noExt = sf.replace(/\.(tsx?|jsx?)$/, ''); // 'src/db.ts' → 'src/db'
+    const base = posixPath.basename(noExt);         // 'db'
+    let rel = posixPath.relative(testDir, noExt);   // '../../../db'
+    if (!rel.startsWith('.')) rel = `./${rel}`;
+    const correct = `${rel}.js`;
+    // Relative import (`./` or `../…/`) whose final segment is this shared file.
+    const re = new RegExp(`(from\\s*['"\`])(?:\\.[^'"\`]*/)?${base}(?:\\.js)?(['"\`])`, 'g');
+    code = code.replace(re, `$1${correct}$2`);
+  }
+  return code;
 }
 
 /**

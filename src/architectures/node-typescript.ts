@@ -219,8 +219,9 @@ default-exported Hono app/router — never its internals. Derive every assertion
 
 - Import the module's default export and drive it in-process with \`app.request(path, init)\` — no network, no
   server, no port.
-- If the module uses the database, \`import { runMigrations } from '../../db.js'\` and call it in
-  \`beforeAll(() => runMigrations())\` so the schema exists.
+- The test file lives in \`__tests__/\` — ONE directory deeper than the module — so shared-file imports need
+  one more \`../\` than the module uses. If the module uses the database, \`import { runMigrations } from
+  '../../../db.js'\` and call it in \`beforeAll(() => runMigrations())\` so the schema exists.
 - Assert HTTP status codes and JSON response shapes for each requirement (successful create → 201 with the
   assigned id/seq; a validation failure → 400 with an error; a list → 200 with an array in order).
 - One \`it()\` per behavior. Import ONLY vitest and the module under test — no external packages.
@@ -229,7 +230,7 @@ Example shape:
 \`\`\`ts
 import { describe, it, expect, beforeAll } from 'vitest';
 import mod from '../the-module.js';
-import { runMigrations } from '../../db.js';
+import { runMigrations } from '../../../db.js';
 beforeAll(() => runMigrations());
 it('appends an operation and returns 201 with a seq', async () => {
   const res = await mod.request('/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'set-content', payload: {} }) });
