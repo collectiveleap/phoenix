@@ -201,6 +201,28 @@ export function buildPrompt(
 }
 
 /** System prompt for generating behavioral tests (independent of the implementation). */
+/**
+ * Build a continuation prompt (#24): the original generation prompt plus everything
+ * produced so far, asking the model to continue from exactly where the output was cut
+ * off — output only the remaining content, no preamble, no repetition. The response is
+ * concatenated directly onto the accumulated output (with seam-overlap stripped by the
+ * caller), so a large module is assembled across several bounded calls.
+ */
+export function buildContinuationPrompt(originalPrompt: string, soFar: string): string {
+  return [
+    originalPrompt,
+    '',
+    '## CONTINUATION',
+    'You already produced the output below, but it was cut off before completion. Continue from EXACTLY where',
+    'it stops: output ONLY the remaining content — no preamble, no explanation, no code fences — and do NOT',
+    'repeat any text already shown. Your output will be appended directly onto the end of it.',
+    '',
+    '--- OUTPUT SO FAR (already emitted; do not repeat) ---',
+    soFar,
+    '--- END OF OUTPUT SO FAR; continue from here ---',
+  ].join('\n');
+}
+
 export function getTestSystemPrompt(target?: ResolvedTarget | null): string {
   const lang = target?.runtime.language ?? 'TypeScript';
   return `You are a senior ${lang} engineer writing behavioral tests with vitest.

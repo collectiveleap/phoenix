@@ -16,7 +16,7 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt } from './llm/prompt.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import { DEFAULT_ROLE_SURFACES } from './models/architecture.js';
 import type { InterfaceContract } from './models/interface-contract.js';
@@ -40,6 +40,8 @@ export class OutputBudgetExceededError extends Error {
   readonly iuName: string;
   readonly budget: number;
   readonly remediation: string;
+  /** Accumulated output when a non-converging continuation hit the cap (#24), for capture. */
+  partialText?: string;
   constructor(iuName: string, budget: number) {
     const remediation =
       `${iuName} output exceeded the ${budget}-token budget — ` +
@@ -142,7 +144,8 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
           const e = err instanceof OutputBudgetExceededError
             ? err
             : new OutputBudgetExceededError(iu.name, ctx.maxTokens ?? GENERATE_MAX_TOKENS);
-          const partialText = err instanceof TruncationError ? err.partialText : undefined;
+          const partialText = err instanceof TruncationError ? err.partialText
+            : err instanceof OutputBudgetExceededError ? err.partialText : undefined;
           const partialPath = partialText ? writePartial(ctx, iu, outputPath, partialText) : undefined;
           ctx.onProgress?.(iu, 'error', e.remediation);
           ctx.journal?.event('module_failed', {
@@ -475,6 +478,23 @@ export function budgetsForModel(budgets: HealthBudgets, model: string | undefine
   };
 }
 
+/** Default continuation-round cap before a non-converging generation hard-fails. */
+const DEFAULT_MAX_CONTINUATIONS = 4;
+
+/**
+ * Strip the seam overlap when appending a continuation chunk (#24): if the model
+ * re-emitted some of the tail it was shown, drop the longest suffix of `accumulated`
+ * that is a prefix of `chunk`, so the concatenation never duplicates at the join.
+ * Bounded scan (the overlap is at the seam, not arbitrarily deep).
+ */
+export function stripOverlap(accumulated: string, chunk: string): string {
+  const max = Math.min(accumulated.length, chunk.length, 4000);
+  for (let k = max; k > 0; k--) {
+    if (accumulated.endsWith(chunk.slice(0, k))) return chunk.slice(k);
+  }
+  return chunk;
+}
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
@@ -537,12 +557,54 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   const maxTokens = ctx.maxTokens ?? GENERATE_MAX_TOKENS;
   const model = pickModelForIU(iu, ctx); // per-role model override (G2); undefined ⇒ provider default
 
-  const generateOnce = async (): Promise<string> => {
-    if (template) {
-      const raw = await callLLM(prompt, { system: systemPrompt, temperature: 0.1, maxTokens, model }, 0);
-      return assembleFromTemplate(template, raw, iu);
+  // Produce the raw module output, continuing across calls when a single call
+  // exceeds its byte/duration bound (#24): a large module is assembled from several
+  // bounded chunks instead of failing as a runaway. A module that fits one call
+  // returns immediately. A non-converging generation hard-fails at MAX_CONTINUATIONS,
+  // preserving #8's runaway guard.
+  const isBounded = (e: unknown): e is BoundsExceededError | TruncationError =>
+    e instanceof BoundsExceededError || e instanceof TruncationError;
+
+  // Read the toggle/cap per call so a run can A/B without a restart (#24).
+  const continuationsEnabled = process.env.PHOENIX_GENERATE_CONTINUATIONS !== '0';
+  const maxContinuations = Number(process.env.PHOENIX_GENERATE_MAX_CONTINUATIONS) || DEFAULT_MAX_CONTINUATIONS;
+
+  const generateRaw = async (opts: GenerateOptions): Promise<string> => {
+    let accumulated: string;
+    try {
+      return await callLLM(prompt, opts, 0); // completed within bounds — no continuation
+    } catch (err) {
+      if (!continuationsEnabled || !isBounded(err)) throw err;
+      accumulated = err.partialText ?? '';
     }
-    return cleanCodeResponse(await callLLM(prompt, { system: systemPrompt, temperature: 0.2, maxTokens, model }, 0));
+    for (let round = 1; round <= maxContinuations; round++) {
+      journal?.event('generation_continuation', {
+        iu: iu.name, round, bytesSoFar: Buffer.byteLength(accumulated, 'utf8'),
+      });
+      try {
+        const chunk = await callLLM(buildContinuationPrompt(prompt, accumulated), opts, round);
+        accumulated += stripOverlap(accumulated, chunk);
+        journal?.event('generation_assembled', {
+          iu: iu.name, totalBytes: Buffer.byteLength(accumulated, 'utf8'), continuations: round, converged: true,
+        });
+        return accumulated; // a call completed within bounds → the model finished
+      } catch (err) {
+        if (!isBounded(err)) throw err;
+        accumulated += stripOverlap(accumulated, err.partialText ?? '');
+      }
+    }
+    journal?.event('generation_assembled', {
+      iu: iu.name, totalBytes: Buffer.byteLength(accumulated, 'utf8'), continuations: maxContinuations, converged: false,
+    });
+    const capErr = new OutputBudgetExceededError(iu.name, maxTokens); // non-converging runaway → hard-fail
+    capErr.partialText = accumulated; // preserve what was assembled, for capture
+    throw capErr;
+  };
+
+  const generateOnce = async (): Promise<string> => {
+    const opts: GenerateOptions = { system: systemPrompt, temperature: template ? 0.1 : 0.2, maxTokens, model };
+    const raw = await generateRaw(opts);
+    return template ? assembleFromTemplate(template, raw, iu) : cleanCodeResponse(raw);
   };
 
   let code: string;
@@ -551,10 +613,11 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       code = await generateOnce();
       break;
     } catch (err) {
-      // Truncation (T3) and a bounds runaway (G4) are deterministic — retrying
-      // hits the same ceiling/runaway. Do not count them toward maxRetries;
-      // surface immediately so the module hard-fails with the captured evidence.
-      if (err instanceof TruncationError || err instanceof BoundsExceededError) throw err;
+      // Truncation (T3), a bounds runaway (G4), and a non-converging continuation
+      // (#24, OutputBudgetExceededError) are deterministic — retrying hits the same
+      // ceiling. Do not count them toward maxRetries; surface immediately so the
+      // module hard-fails with the captured evidence.
+      if (err instanceof TruncationError || err instanceof BoundsExceededError || err instanceof OutputBudgetExceededError) throw err;
       if (genAttempt >= maxRetries) throw err;
       journal?.event('generate_retry', {
         iu: iu.name,

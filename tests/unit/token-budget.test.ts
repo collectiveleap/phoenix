@@ -2,7 +2,7 @@
  * Output-token budget for large modules — evidence for T1–T5.
  * See https://github.com/collectiveleap/phoenix/issues/21.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -103,8 +103,12 @@ describe('T2: a max_tokens truncation is recognized as truncation, not a stall',
 describe('T3: a truncation is not retried; it is reported with the fix', () => {
   let phoenixRoot: string;
   beforeEach(() => { phoenixRoot = mkdtempSync(join(tmpdir(), 'phoenix-tb-')); });
+  // With continuation off (#24), a truncation is the deterministic ceiling tested here;
+  // continuation behavior is covered in continuation.test.ts.
+  afterEach(() => { delete process.env.PHOENIX_GENERATE_CONTINUATIONS; });
 
   it('makes exactly one attempt, no stub, and reports the remediation', async () => {
+    process.env.PHOENIX_GENERATE_CONTINUATIONS = '0';
     const { iu, canon } = makeIU();
     const provider = new TruncatingProvider();
     const journal = new RunJournal(phoenixRoot);

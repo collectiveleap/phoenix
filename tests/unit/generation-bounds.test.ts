@@ -2,7 +2,7 @@
  * G4 — Phoenix-side generation bounds + capture + diagnosability.
  * See https://github.com/collectiveleap/phoenix/issues/15 and https://github.com/collectiveleap/phoenix/issues/8.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -165,8 +165,12 @@ describe('G1: a journaled single-module regen exposes the diagnostic readout fie
 describe('G4: regen hard-fails a bounds runaway (no stub, no retry) and captures the partial output', () => {
   let phoenixRoot: string;
   beforeEach(() => { phoenixRoot = mkdtempSync(join(tmpdir(), 'phoenix-g4-')); });
+  // Continuation off (#24): this pins the bounds mechanism in isolation (a single bound
+  // → immediate over_generation_bounds). Continuation's cap behavior is in continuation.test.ts.
+  afterEach(() => { delete process.env.PHOENIX_GENERATE_CONTINUATIONS; });
 
   it('returns a failed result with a captured partial-output path, one attempt only', async () => {
+    process.env.PHOENIX_GENERATE_CONTINUATIONS = '0';
     const { iu, canon } = makeIU();
     const journal = new RunJournal(phoenixRoot);
     journal.startRun();
