@@ -15,6 +15,36 @@
  */
 
 import type { InterfaceDialect } from './interface-contract.js';
+import { EvidenceKind } from './evidence.js';
+
+// ─── Evaluation surfaces (how a kind of component is observed and asserted) ──
+
+/**
+ * An evaluation surface names *how* a kind of component is observed and asserted —
+ * the seam between a role and its evidence. An architecture declares, per role,
+ * which surfaces apply (`roleSurfaces`); each surface has an evaluator that produces
+ * one evidence kind. Surfaces — not roles — key the required evidence and the
+ * evaluators, so new architectures slot in by declaring roles → surfaces.
+ */
+export type EvaluationSurface = 'http-endpoints' | 'rendered-ui' | 'client-logic' | 'cli-output';
+
+/** The evidence kind a surface's evaluator produces. */
+export const SURFACE_EVIDENCE: Record<EvaluationSurface, EvidenceKind> = {
+  'http-endpoints': EvidenceKind.UNIT_TEST,    // in-process functional test (app.request via vitest)
+  'rendered-ui': EvidenceKind.UI_BEHAVIOR,     // driving the booted app (Playwright)
+  'client-logic': EvidenceKind.UNIT_TEST,      // reserved — pure-logic unit/property (thick web-app)
+  'cli-output': EvidenceKind.UNIT_TEST,        // reserved — argv → stdout/exit
+};
+
+/**
+ * Default per-role surface mapping (the single source of truth shared by the web-api
+ * architecture and the planner's fallback). `api` is observed via its HTTP contract;
+ * a `web-ui` role is observed by driving the rendered app.
+ */
+export const DEFAULT_ROLE_SURFACES: Record<string, EvaluationSurface[]> = {
+  'api': ['http-endpoints'],
+  'web-ui': ['rendered-ui'],
+};
 
 // ─── Architecture (system shape, language-agnostic) ─────────────────────────
 
@@ -30,6 +60,14 @@ export interface Architecture {
   dataOwnership: string;
   /** How to verify components: 'http-endpoints', 'unit-tests', 'cli-output' */
   evaluationSurface: string;
+
+  /**
+   * Per-role evaluation surfaces — how each role's components are observed and
+   * asserted. Drives the required evidence (via `SURFACE_EVIDENCE`) and evaluator
+   * selection. Activates the formerly-scalar `evaluationSurface` as a consumed,
+   * role-keyed map. Absent ⇒ the planner falls back to `DEFAULT_ROLE_SURFACES`.
+   */
+  roleSurfaces?: Record<string, EvaluationSurface[]>;
 
   /** Architecture-level prompt: describes system shape for the LLM (no language specifics) */
   systemPrompt: string;
@@ -77,6 +115,19 @@ export interface RuntimeTarget {
    * the spec, not the implementation). Absent ⇒ only the smoke test is produced.
    */
   testGuidance?: string;
+
+  /**
+   * How to write UI scenarios for this target's `rendered-ui` surface — driving the
+   * running app through observable behavior (roles/visible text), never internals or
+   * selectors. Absent ⇒ no rendered-ui scenarios are compiled for this target.
+   */
+  uiGuidance?: string;
+  /**
+   * Browser engines to provision for UI evaluation (e.g. `['chromium']` for Playwright).
+   * Drives the non-fatal browser-install step and the `playwright.config.ts` scaffold.
+   * Absent ⇒ no browser is provisioned; the rendered-ui surface degrades to INCOMPLETE.
+   */
+  browserDeps?: string[];
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

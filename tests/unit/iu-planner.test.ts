@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planIUs } from '../../src/iu-planner.js';
+import { planIUs, isWebUIName } from '../../src/iu-planner.js';
 import { parseSpec } from '../../src/spec-parser.js';
 import { extractCanonicalNodes } from '../../src/canonicalizer.js';
 
@@ -81,5 +81,32 @@ JWT tokens must be signed with RS256.`;
         expect(iu.evidence_policy.required).toContain('unit_tests');
       }
     }
+  });
+});
+
+describe('Phase 0: surface-driven evidence policy (rendered-ui vs http-endpoints)', () => {
+  // An api resource and a web-ui page (separate docs → separate modules), both
+  // pushed to medium+ by constraints.
+  const clauses = [
+    ...parseSpec('# Tasks\n\nThe service must create a task. A task title must never be empty.', 'tasks.md'),
+    ...parseSpec('# Web Experience\n\nThe page must render the task list. The list must never display tasks out of order.', 'web.md'),
+  ];
+  const canon = extractCanonicalNodes(clauses);
+  const ius = planIUs(canon, clauses);
+
+  it('an api module requires unit_tests (its http-endpoints surface), not ui_behavior', () => {
+    const api = ius.find(iu => !isWebUIName(iu.name));
+    expect(api).toBeDefined();
+    expect(['medium', 'high', 'critical']).toContain(api!.risk_tier);
+    expect(api!.evidence_policy.required).toContain('unit_tests');
+    expect(api!.evidence_policy.required).not.toContain('ui_behavior');
+  });
+
+  it('a web-ui module requires ui_behavior (its rendered-ui surface), NOT unit_tests', () => {
+    const web = ius.find(iu => isWebUIName(iu.name));
+    expect(web).toBeDefined();
+    expect(['medium', 'high', 'critical']).toContain(web!.risk_tier);
+    expect(web!.evidence_policy.required).toContain('ui_behavior');
+    expect(web!.evidence_policy.required).not.toContain('unit_tests');
   });
 });

@@ -7,6 +7,8 @@ export enum EvidenceKind {
   LINT = 'lint',
   BOUNDARY_VALIDATION = 'boundary_validation',
   UNIT_TEST = 'unit_tests',
+  /** Rendered/interactive behavior, evaluated by driving the running app (e.g. Playwright). */
+  UI_BEHAVIOR = 'ui_behavior',
   PROPERTY_TEST = 'property_tests',
   STATIC_ANALYSIS = 'static_analysis',
   THREAT_NOTE = 'threat_note',

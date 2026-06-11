@@ -240,6 +240,29 @@ it('appends an operation and returns 201 with a seq', async () => {
 });
 \`\`\``;
 
+const UI_GUIDANCE = `Write Playwright UI scenarios that drive the RUNNING app through what a user OBSERVES —
+never its internals. Derive every assertion from the requirements; the rendered HTML/CSS/JS is NOT given to you.
+
+- Import from \`@playwright/test\`; the base URL is configured, so navigate with \`await page.goto('/')\`.
+- Assert ONLY via accessibility/visible-text queries: \`page.getByRole(...)\`, \`page.getByText(...)\`,
+  \`page.getByLabel(...)\`, \`page.getByPlaceholder(...)\`. NEVER use CSS selectors, \`data-testid\`,
+  \`page.locator('.class')\`, or \`page.$\` — assert what the user sees, not how it's built.
+- Drive real interactions (\`getByRole('button', { name: ... }).click()\`, \`getByLabel(...).fill(...)\`,
+  \`keyboard.press(...)\`) and assert the observable outcome with auto-waiting (\`await expect(...).toBeVisible()\`).
+- One \`test()\` per observable behavior. Cover the round-trips the requirements imply (e.g. create an item →
+  it appears in the list; an invalid input → an error message is shown).
+
+Example shape:
+\`\`\`ts
+import { test, expect } from '@playwright/test';
+test('a created item appears in the list', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Title').fill('Buy milk');
+  await page.getByRole('button', { name: /add|create/i }).click();
+  await expect(page.getByText('Buy milk')).toBeVisible();
+});
+\`\`\``;
+
 // ─── Export ─────────────────────────────────────────────────────────────────
 
 export const nodeTypescript: RuntimeTarget = {
@@ -266,12 +289,17 @@ export const nodeTypescript: RuntimeTarget = {
     '@types/node': '^22.0.0',
     '@types/better-sqlite3': '^7.6.0',
     'tsx': '^4.0.0',
+    '@playwright/test': '^1.49.0',
   },
+
+  // Provision a browser engine so the rendered-ui surface can be driven (Playwright).
+  browserDeps: ['chromium'],
 
   moduleTemplate: MODULE_TEMPLATE,
   promptExtension: PROMPT_EXTENSION,
   codeExamples: CODE_EXAMPLES,
   testGuidance: TEST_GUIDANCE,
+  uiGuidance: UI_GUIDANCE,
 
   sharedFiles: {
     'src/db.ts': DB_FILE,

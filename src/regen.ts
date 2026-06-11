@@ -16,8 +16,10 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt } from './llm/prompt.js';
 import type { ResolvedTarget } from './models/architecture.js';
+import { DEFAULT_ROLE_SURFACES } from './models/architecture.js';
+import type { InterfaceContract } from './models/interface-contract.js';
 import type { InterfaceEntry } from './scaffold.js';
 import { sha256 } from './semhash.js';
 import { probeTypechecker, typecheckProject } from './harness/typecheck.js';
@@ -179,6 +181,25 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
         ctx.journal?.event('behavioral_tests', { iu: iu.name, module: base });
       }
     }
+
+    // rendered-ui surface: compile Playwright UI scenarios from the spec (Phase 4 of
+    // the surface-driven evals). The page's behavior is defined relative to the API
+    // round-trips it drives, so pass its dependency contracts — never the markup.
+    const surfaces = entry
+      ? (ctx.target.architecture.roleSurfaces?.[entry.role] ?? DEFAULT_ROLE_SURFACES[entry.role] ?? [])
+      : [];
+    if (entry && out && surfaces.includes('rendered-ui') && ctx.target.runtime.uiGuidance) {
+      const dir = out.split('/').slice(0, -1).join('/');
+      const base = out.split('/').pop()!.replace(/\.ts$/, '');
+      const depContracts = iu.dependencies
+        .map(depId => ctx.interfaces?.find(e => e.iu_id === depId)?.contract)
+        .filter((c): c is InterfaceContract => !!c);
+      const raw = await generateUiScenariosWithLLM(iu, ctx, depContracts);
+      if (raw) {
+        files.set(`${dir}/__tests__/${base}.ui.spec.ts`, raw);
+        ctx.journal?.event('ui_scenarios', { iu: iu.name, module: base });
+      }
+    }
   }
 
   // Build manifest entries
@@ -280,6 +301,41 @@ async function generateTestsWithLLM(
     model: pickModelForIU(iu, ctx),
   };
   const cc = { stage: 'generate-tests', target: iu.name, attempt: 0 };
+  try {
+    let raw: string;
+    if (journal && budgets) raw = await supervisedGenerate(journal, llm, prompt, opts, cc, { budgets });
+    else if (journal) raw = await recordedGenerate(journal, llm, prompt, opts, cc);
+    else raw = await llm.generate(prompt, opts);
+    const code = cleanCodeResponse(raw);
+    return code && code.trim().length > 0 ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate a page's Playwright UI scenarios FROM ITS SPEC (Phase 4, rendered-ui
+ * surface). Independent of the generated markup — the prompt is built from the
+ * canonical clauses + the page's dependency API contracts (the round-trips it
+ * drives), never the implementation. Best-effort: any failure (no LLM, truncation,
+ * over-budget) returns null and leaves the rendered-ui surface unproduced → the gate
+ * reports it INCOMPLETE — a missing scenario never blocks the module nor falsely passes it.
+ */
+async function generateUiScenariosWithLLM(
+  iu: ImplementationUnit,
+  ctx: RegenContext,
+  depContracts: InterfaceContract[],
+): Promise<string | null> {
+  const { llm, canonNodes = [], target, journal, budgets } = ctx;
+  if (!llm || !target) return null;
+  const prompt = buildUiScenarioPrompt(iu, canonNodes, depContracts, target);
+  const opts: GenerateOptions = {
+    system: getUiSystemPrompt(target),
+    temperature: 0.2,
+    maxTokens: ctx.maxTokens ?? GENERATE_MAX_TOKENS,
+    model: pickModelForIU(iu, ctx),
+  };
+  const cc = { stage: 'generate-ui-scenarios', target: iu.name, attempt: 0 };
   try {
     let raw: string;
     if (journal && budgets) raw = await supervisedGenerate(journal, llm, prompt, opts, cc, { budgets });

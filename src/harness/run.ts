@@ -132,7 +132,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
 
     // ── Plan ────────────────────────────────────────────────────────────
     journal.startStage('plan');
-    const ius = planIUs(canon.nodes, clauses);
+    const ius = planIUs(canon.nodes, clauses, { roleSurfaces: arch?.architecture.roleSurfaces });
     saveIUs(phoenixDir, ius);
     const report = analyzePlan(ius, canon.nodes, clauses, { sizeThreshold: policy.sizeThreshold });
     totalModules = ius.length;
@@ -183,6 +183,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       const prov = provision({
         projectRoot,
         nativeDeps: arch.runtime.nativeDeps,
+        browserDeps: arch.runtime.browserDeps,
         log,
       });
       for (const s of prov.steps) log(`  ${s.ok ? '✔' : '✖'} ${s.name}: ${s.detail}`);

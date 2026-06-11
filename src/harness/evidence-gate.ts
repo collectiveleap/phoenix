@@ -19,9 +19,12 @@ import type { ContractViolation } from './contract-check.js';
 
 /**
  * Map the gate's checks to per-IU evidence. `typecheck` and `unit_tests` are
- * whole-project (one result applies to every module); `boundary_validation` is
- * per-module (a contract violation naming the module fails its boundary). A check
- * that did not run yields no record → the policy reports that type as missing.
+ * whole-project (one result applies to every module); `ui_behavior` is whole-project
+ * too but **surface-scoped** — recorded only on IUs whose policy requires it (the
+ * rendered-ui surface), so a rendered-ui module is never satisfied by the project
+ * unit_tests/smoke. `boundary_validation` is per-module (a contract violation naming
+ * the module fails its boundary). A check that did not run yields no record → the
+ * policy reports that type as missing (INCOMPLETE).
  */
 export function produceEvidence(
   ius: ImplementationUnit[],
@@ -32,6 +35,7 @@ export function produceEvidence(
   const ok = (name: string): boolean | undefined => checks.find(c => c.name === name)?.ok;
   const typecheckOk = ok('typecheck');
   const unitTestsOk = ok('unit_tests'); // undefined when not run (skipRuntime)
+  const uiBehaviorOk = ok('ui_behavior'); // undefined when not run (no browser / no specs)
 
   const records: EvidenceRecord[] = [];
   let seq = 0;
@@ -46,6 +50,12 @@ export function produceEvidence(
   for (const iu of ius) {
     if (typecheckOk !== undefined) push(iu, EvidenceKind.TYPECHECK, typecheckOk);
     if (unitTestsOk !== undefined) push(iu, EvidenceKind.UNIT_TEST, unitTestsOk);
+    // ui_behavior is surface-scoped: attach it only to IUs whose declared policy
+    // requires it (the rendered-ui surface) — the IU's own policy is the source of
+    // truth, so a rendered-ui module is never satisfied by the project unit_tests/smoke.
+    if (uiBehaviorOk !== undefined && iu.evidence_policy?.required?.includes(EvidenceKind.UI_BEHAVIOR)) {
+      push(iu, EvidenceKind.UI_BEHAVIOR, uiBehaviorOk);
+    }
     const violated = contractViolations.some(v => v.module === iu.name);
     push(iu, EvidenceKind.BOUNDARY_VALIDATION, !violated);
   }

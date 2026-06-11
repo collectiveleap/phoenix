@@ -260,3 +260,64 @@ export function buildTestPrompt(
   lines.push('Output the complete test module now.');
   return lines.join('\n');
 }
+
+export function getUiSystemPrompt(target?: ResolvedTarget | null): string {
+  const lang = target?.runtime.language ?? 'TypeScript';
+  return `You are a senior ${lang} engineer writing end-to-end UI scenarios with Playwright (@playwright/test).
+
+Rules:
+- Output ONLY the Playwright spec module code. No markdown fences, no explanation.
+- Drive the RUNNING app through what a USER OBSERVES — do NOT reference or assume the rendered HTML/CSS/DOM structure.
+- Every assertion must come from the stated requirements (the spec), not from how the UI happens to be built.
+- Assert ONLY via accessibility/visible-text queries (getByRole/getByText/getByLabel/getByPlaceholder). NEVER use CSS selectors, data-testid, page.locator('.class'), or page.$.
+- Import ONLY from '@playwright/test'. The base URL is configured; navigate with page.goto('/').`;
+}
+
+/**
+ * Build the prompt for generating a page's Playwright UI scenarios FROM ITS SPEC —
+ * deliberately WITHOUT the generated markup, so scenarios assert observable behavior
+ * rather than mirroring the implementation (independence). The dependency API contracts
+ * describe the round-trips the page drives (e.g. create → the item appears).
+ */
+export function buildUiScenarioPrompt(
+  iu: ImplementationUnit,
+  canonNodes: CanonicalNode[],
+  depContracts: InterfaceContract[],
+  target?: ResolvedTarget | null,
+): string {
+  const lines: string[] = [];
+  lines.push(`Write a Playwright UI scenario file for the "${iu.name}" page, from its SPECIFICATION below — NOT its implementation (you are not shown the rendered markup on purpose).`);
+  lines.push('');
+  lines.push('## Import Playwright');
+  lines.push('```');
+  lines.push(`import { test, expect } from '@playwright/test';`);
+  lines.push('```');
+  lines.push('');
+
+  const iuNodes = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id));
+  const requirements = iuNodes.filter(n => n.type === 'REQUIREMENT' || n.type === 'CONSTRAINT' || n.type === 'INVARIANT');
+  if (requirements.length > 0) {
+    lines.push('## Observable behaviors — write at least one scenario for each:');
+    for (const r of requirements) lines.push(`- ${r.statement}`);
+    lines.push('');
+  }
+
+  const ops = depContracts.flatMap(c => c.operations);
+  if (ops.length > 0) {
+    lines.push('## The page drives these API round-trips (act in the UI, then assert the observable result):');
+    for (const op of ops) {
+      const ad = op.address as { method?: string; path?: string } | undefined;
+      lines.push(`- ${ad?.method ?? ''} ${ad?.path ?? ''} — ${op.purpose}`);
+    }
+    lines.push('');
+  }
+
+  if (target?.runtime.uiGuidance) {
+    lines.push('## How to write UI scenarios for this architecture:');
+    lines.push(target.runtime.uiGuidance);
+    lines.push('');
+  }
+
+  lines.push('Output the complete Playwright spec module now.');
+  return lines.join('\n');
+}

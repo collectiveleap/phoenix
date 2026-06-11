@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { typecheckProject } from './typecheck.js';
+import { SURFACE_EVALUATORS } from './evaluators.js';
 
 export interface AcceptanceCheck {
   name: string;
@@ -39,6 +40,8 @@ export interface AcceptanceOptions {
   port?: number;
   /** Max ms to wait for the server to become reachable. Default 15000. */
   bootTimeoutMs?: number;
+  /** Wall-clock budget for each post-boot surface evaluator (e.g. Playwright). Default 120000. */
+  uiTimeoutMs?: number;
 }
 
 /** Find a free TCP port. */
@@ -154,6 +157,20 @@ export async function runAcceptance(opts: AcceptanceOptions): Promise<Acceptance
     booted = probe.ok;
     checks.push({ name: 'boot', ok: booted, detail: booted ? `listening on :${port}` : 'server did not start' });
     checks.push({ name: 'root-route', ok: probe.ok, detail: probe.detail });
+
+    // Post-boot surface evaluators (e.g. rendered-ui via Playwright) drive the live
+    // server while it's up. Each self-gates and degrades to not-ran (→ INCOMPLETE) when
+    // its tooling/inputs are absent — never a false red. Synchronous, so they finish
+    // before teardown below.
+    if (booted) {
+      const baseUrl = `http://localhost:${port}`;
+      const uiTimeoutMs = opts.uiTimeoutMs ?? 120_000;
+      for (const evaluator of Object.values(SURFACE_EVALUATORS)) {
+        if (!evaluator) continue;
+        const res = evaluator.run({ projectRoot: opts.projectRoot, baseUrl, timeoutMs: uiTimeoutMs });
+        if (res.ran) checks.push({ name: evaluator.produces, ok: !!res.ok, detail: res.detail ?? '' });
+      }
+    }
   } finally {
     killTree();
   }

@@ -15,6 +15,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { detectPackageManager } from './preflight.js';
 
 export interface ProvisionStep {
@@ -33,6 +35,8 @@ export interface ProvisionOptions {
   projectRoot: string;
   /** Declared native deps to build/verify (from `arch.runtime.nativeDeps`). */
   nativeDeps?: string[];
+  /** Browser engines to provision for UI evaluation (from `arch.runtime.browserDeps`). */
+  browserDeps?: string[];
   /** Override the detected package manager (mainly for tests). */
   packageManager?: string | null;
   /** Per-step logger. */
@@ -123,6 +127,25 @@ export function provision(opts: ProvisionOptions): ProvisionResult {
       detail: built ? `${dep} binding loads` : `native dependency \`${dep}\` not built — run \`${rebuildHint}\``,
     });
     if (!built) return { ok: false, pm, steps };
+  }
+
+  // 3. Provision browser engines for UI evaluation (e.g. Playwright chromium).
+  //    NON-FATAL by design: a missing browser degrades the rendered-ui surface to
+  //    INCOMPLETE (the evaluator reports not-ran) — it must NOT fail the run, unlike
+  //    the install/native steps above. Skippable for constrained CI.
+  for (const engine of opts.browserDeps ?? []) {
+    if (process.env.PHOENIX_SKIP_BROWSER_INSTALL) {
+      steps.push({ name: `browser:${engine}`, ok: false, detail: 'skipped (PHOENIX_SKIP_BROWSER_INSTALL) — UI evals INCOMPLETE' });
+      continue;
+    }
+    const pw = join(opts.projectRoot, 'node_modules', '.bin', 'playwright');
+    if (!existsSync(pw)) {
+      steps.push({ name: `browser:${engine}`, ok: false, detail: 'playwright not installed — UI evals INCOMPLETE' });
+      continue;
+    }
+    log(`provision: playwright install ${engine}`);
+    steps.push(runStep(`browser:${engine}`, pw, ['install', engine], opts.projectRoot, 300_000));
+    // Intentionally no early return — browser provisioning never fails the run.
   }
 
   return { ok: true, pm, steps };

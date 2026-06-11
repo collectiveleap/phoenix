@@ -16,6 +16,8 @@ import { CanonicalType } from './models/canonical.js';
 import type { Clause } from './models/clause.js';
 import type { ImplementationUnit } from './models/iu.js';
 import { defaultBoundaryPolicy, defaultEnforcement } from './models/iu.js';
+import type { EvaluationSurface } from './models/architecture.js';
+import { SURFACE_EVIDENCE, DEFAULT_ROLE_SURFACES } from './models/architecture.js';
 import { sha256 } from './semhash.js';
 import { deriveInterfaces } from './scaffold.js';
 import { GENERATE_MAX_TOKENS } from './regen.js';
@@ -30,7 +32,12 @@ import { GENERATE_MAX_TOKENS } from './regen.js';
 export function planIUs(
   canonNodes: CanonicalNode[],
   clauses: Clause[],
+  opts?: { roleSurfaces?: Record<string, EvaluationSurface[]> },
 ): ImplementationUnit[] {
+  // Per-role evaluation surfaces drive each IU's required evidence. Production
+  // passes the bound architecture's map; callers without an arch get the default.
+  const roleSurfaces = opts?.roleSurfaces ?? DEFAULT_ROLE_SURFACES;
+
   // Filter out CONTEXT nodes — they don't generate code
   canonNodes = canonNodes.filter(n => n.type !== CanonicalType.CONTEXT);
   if (canonNodes.length === 0) return [];
@@ -129,7 +136,7 @@ export function planIUs(
       boundary_policy: defaultBoundaryPolicy(),
       enforcement: defaultEnforcement(),
       evidence_policy: {
-        required: evidenceForTier(riskTier),
+        required: evidenceForTier(riskTier, isWebUIName(name) ? 'web-ui' : 'api', roleSurfaces),
       },
       output_files: [`src/generated/${serviceName}/${fileName}.ts`],
     });
@@ -143,7 +150,7 @@ export function planIUs(
   // provider dependency a real graph edge — the substrate for contract-bearing
   // invalidation (a provider interface change re-runs its consumers) and cascade.
   const serviceDir = (iu: ImplementationUnit) => iu.output_files[0]?.split('/').slice(0, -1).join('/') ?? '';
-  const isWebUI = (iu: ImplementationUnit) => /\b(web|ui|frontend|interface|page|dashboard)\b/.test(iu.name.toLowerCase());
+  const isWebUI = (iu: ImplementationUnit) => isWebUIName(iu.name);
   for (const iu of ius) {
     if (!isWebUI(iu)) continue;
     iu.dependencies = ius
@@ -527,22 +534,38 @@ function deriveRiskTier(nodes: CanonicalNode[]): 'low' | 'medium' | 'high' | 'cr
   return 'low';
 }
 
+/** Does this module name denote a web-UI role (vs an api role)? */
+export function isWebUIName(name: string): boolean {
+  return /\b(web|ui|frontend|interface|page|dashboard)\b/.test(name.toLowerCase());
+}
+
+/** Base evidence every module gets, regardless of role or surface. */
+const BASE_EVIDENCE = ['typecheck', 'boundary_validation'];
+
 /**
- * Required evidence per risk tier. Declares ONLY evidence Phoenix actually
- * produces and the gate evaluates — `typecheck`, `boundary_validation`, and
- * (medium+) `unit_tests`. A module must not declare evidence the pipeline won't
- * check (`lint`/`property_tests`/`static_analysis`/`human_signoff`): a policy
- * that lists unproduced types is dishonest — it lets "verified" assert nothing.
- * Re-add a type here only once a producer exists for it.
+ * Required evidence for an IU: the base checks, plus — at medium+ risk — the
+ * evidence kind for each of the role's evaluation surfaces (via `roleSurfaces` +
+ * `SURFACE_EVIDENCE`). So a thin web-ui's `rendered-ui` surface requires
+ * `ui_behavior` (NOT `unit_tests` — the in-process functional runner is the wrong
+ * bar for a thin client), while an api's `http-endpoints` surface requires
+ * `unit_tests`. Declares ONLY evidence Phoenix produces and the gate evaluates: a
+ * policy that lists unproduced types is dishonest — it lets "verified" assert
+ * nothing. A surface whose producer is missing this run reports INCOMPLETE, not PASS.
  */
-function evidenceForTier(tier: string): string[] {
-  switch (tier) {
-    case 'low': return ['typecheck', 'boundary_validation'];
-    case 'medium': return ['typecheck', 'boundary_validation', 'unit_tests'];
-    case 'high': return ['typecheck', 'boundary_validation', 'unit_tests'];
-    case 'critical': return ['typecheck', 'boundary_validation', 'unit_tests'];
-    default: return ['typecheck'];
+function evidenceForTier(
+  tier: string,
+  role: 'api' | 'web-ui',
+  roleSurfaces: Record<string, EvaluationSurface[]>,
+): string[] {
+  if (!['low', 'medium', 'high', 'critical'].includes(tier)) return ['typecheck'];
+  const required = [...BASE_EVIDENCE];
+  if (tier !== 'low') {
+    for (const surface of roleSurfaces[role] ?? []) {
+      const kind = SURFACE_EVIDENCE[surface];
+      if (kind && !required.includes(kind)) required.push(kind);
+    }
   }
+  return required;
 }
 
 function slugify(name: string): string {

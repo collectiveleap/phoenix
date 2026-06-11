@@ -9,6 +9,7 @@
  */
 
 import type { Architecture } from '../models/architecture.js';
+import { DEFAULT_ROLE_SURFACES } from '../models/architecture.js';
 
 export const webApi: Architecture = {
   name: 'web-api',
@@ -17,6 +18,10 @@ export const webApi: Architecture = {
   communicationPattern: 'rest',
   dataOwnership: 'per-component',
   evaluationSurface: 'http-endpoints',
+
+  // api modules are observed via their HTTP contract; a web-ui module is observed
+  // by driving the rendered app (rendered-ui → Playwright).
+  roleSurfaces: DEFAULT_ROLE_SURFACES,
 
   systemPrompt: `## Architecture: API-driven Web Application
 
