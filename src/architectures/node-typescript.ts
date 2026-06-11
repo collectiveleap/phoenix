@@ -134,6 +134,18 @@ router.delete('/:id', (c) => { ... });
 - Return c.html() with a complete HTML document
 - Use fetch('/resource-name') to call sibling API modules (no /api/ prefix)
 - Include ALL CSS and JavaScript inline
+
+### Web interface — render robustness (the page replays the whole server log on every load)
+- NEVER reuse a stateful global (\`/g\`) regex across nested calls. A \`while ((m = re.exec(s)))\` loop whose body
+  calls a function that runs \`.replace\`/\`.exec\` on the SAME \`/g\` regex resets its \`lastIndex\` to 0 and loops
+  forever. Parse with \`[...s.matchAll(/…/g)]\` or a fresh regex created per call — never a shared mutable one.
+- Render each item defensively: wrap the per-item render in try/catch and show a small error placeholder for
+  that one item on failure. One bad or unrecognised item must NEVER hang, blank, or block the rest of the page.
+- Never write an unbounded loop over input you don't control; bound every loop so malformed data cannot freeze
+  the page.
+- Tolerate data you cannot render: if an item/operation can't be folded or rendered, SKIP it (flagged), don't
+  throw — the data source may be append-only and replay every load, so one unrenderable item must not make the
+  app permanently unusable. A reload must recover.
 `;
 
 // ─── Code examples ──────────────────────────────────────────────────────────
