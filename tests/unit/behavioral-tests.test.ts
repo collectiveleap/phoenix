@@ -24,7 +24,7 @@ class TestAwareProvider implements LLMProvider {
     this.seen.push({ system, prompt });
     const isTest = /behavioral test/i.test(system + prompt);
     const body = isTest
-      ? `import { it, expect, beforeAll } from 'vitest';\nimport mod from '../tasks.js';\nimport { runMigrations } from '../../db.js';\nbeforeAll(() => runMigrations());\nit('creates → 201', async () => { const r = await mod.request('/', { method: 'POST' }); expect(r.status).toBe(201); });\n`
+      ? `import { it, expect, beforeAll } from 'vitest';\nimport mod from '../tasks.js';\nimport { runMigrations } from '../../db.js';\nbeforeAll(() => runMigrations());\nit('creates → 201', async () => { const r = await mod.request('/tasks', { method: 'POST' }); expect(r.status).toBe(201); });\n`
       : `import { Hono } from 'hono';\nconst router = new Hono();\nrouter.post('/', (c) => c.json({}, 201)); // ${IMPL_MARKER}\nexport default router;\nexport const _phoenix = {} as const;\n`;
     hooks?.onFirstByte?.();
     hooks?.onChunk?.(body.length, body);
@@ -53,8 +53,13 @@ describe('Phase 2: behavioral tests are compiled from the spec for api modules',
     const testEntry = [...result.files.keys()].find(p => /__tests__\/tasks\.behavior\.test\.ts$/.test(p));
     expect(testEntry).toBeDefined();
     const testCode = result.files.get(testEntry!)!;
-    expect(testCode).toContain(`import mod from '../tasks.js'`); // module import (correct depth) untouched
     expect(testCode).toContain('toBe(201)');
+    // #3: the router is mounted at its prefix so absolute-path requests resolve — the bare
+    // `import mod` is rewritten into a router mounted at '/tasks' (mirrors app.ts).
+    expect(testCode).toContain(`from '../tasks.js'`);  // module still imported (now aliased)
+    expect(testCode).toContain(`.route('/tasks'`);      // mounted at its registered prefix
+    expect(testCode).toMatch(/from ['"]hono['"]/);
+    expect(testCode).not.toMatch(/import mod from/);    // bare import replaced by the mounted form
     // I1: shared-file import is re-based for the __tests__/ location (one deeper).
     expect(testCode).toContain(`from '../../../db.js'`);
     expect(testCode).not.toContain(`from '../../db.js'`);

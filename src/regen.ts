@@ -171,12 +171,17 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     if (entry?.role === 'api' && entry.contract && out) {
       const dir = out.split('/').slice(0, -1).join('/');
       const base = out.split('/').pop()!.replace(/\.ts$/, '');
-      const raw = await generateTestsWithLLM(iu, ctx, `../${base}.js`, entry.contract);
+      const importPath = `../${base}.js`;
+      const raw = await generateTestsWithLLM(iu, ctx, importPath, entry.contract);
       if (raw) {
         const testPath = `${dir}/__tests__/${base}.behavior.test.ts`;
         // Fix shared-file import depth for the __tests__/ location (I1), regardless
         // of what the model emitted.
-        const testCode = rebaseTestImports(raw, testPath, Object.keys(ctx.target.runtime.sharedFiles ?? {}));
+        let testCode = rebaseTestImports(raw, testPath, Object.keys(ctx.target.runtime.sharedFiles ?? {}));
+        // Mount the router at its prefix so the suite's absolute-path requests resolve (#3):
+        // a bare router serves at '/', but the contract paths the test addresses are
+        // mount-prefixed — mirror app.ts's wiring deterministically.
+        testCode = mountTestRouter(testCode, importPath, entry.mount_path);
         files.set(testPath, testCode);
         ctx.journal?.event('behavioral_tests', { iu: iu.name, module: base });
       }
@@ -241,6 +246,25 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
       ...(Object.keys(consumed).length > 0 ? { consumed_contracts: consumed } : {}),
     },
   };
+}
+
+/**
+ * Mount the imported router at its registered prefix so the generated test exercises
+ * it the way `app.ts` does (#3). A bare router serves its routes at '/', but the suite —
+ * fed the module's mount-prefixed contract paths — addresses the absolute mount path,
+ * so every request 404s. Deterministically rewrite the prescribed `import mod from
+ * '<path>'` into a router mounted at its prefix, so absolute requests resolve regardless
+ * of what the model emitted. Mirrors the runtime wiring; never relies on the model.
+ */
+function mountTestRouter(code: string, importPath: string, mountPath: string): string {
+  if (!mountPath || mountPath === '/') return code;
+  const esc = importPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`import\\s+mod\\s+from\\s+(['"\`])${esc}\\1\\s*;?`);
+  if (!re.test(code)) return code; // model deviated from the prescribed import — best-effort
+  return code.replace(re,
+    `import __phoenixRouter from '${importPath}';\n` +
+    `import { Hono as __PhoenixHono } from 'hono';\n` +
+    `const mod = new __PhoenixHono().route('${mountPath}', __phoenixRouter);`);
 }
 
 /**

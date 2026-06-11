@@ -242,7 +242,7 @@ export function buildTestPrompt(
   }
 
   if (contract && contract.operations.length > 0) {
-    lines.push('## Endpoints to exercise (the module mounts these at its root):');
+    lines.push('## Endpoints to exercise (request these ABSOLUTE paths — the router is mounted at its prefix for you):');
     for (const op of contract.operations) {
       const ad = op.address as { method?: string; path?: string } | undefined;
       lines.push(`- ${ad?.method ?? ''} ${ad?.path ?? ''} — ${op.purpose}`);

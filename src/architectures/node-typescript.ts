@@ -217,8 +217,9 @@ router.delete('/:id', (c) => {
 const TEST_GUIDANCE = `Write vitest behavioral tests that exercise the module through its PUBLIC INTERFACE only — its
 default-exported Hono app/router — never its internals. Derive every assertion from the requirements.
 
-- Import the module's default export and drive it in-process with \`app.request(path, init)\` — no network, no
-  server, no port.
+- Import the module's default export as \`mod\` and drive it in-process with \`mod.request(path, init)\` — no
+  network, no server, no port. The router is mounted at its prefix for you, so request the ABSOLUTE paths
+  listed under "Endpoints to exercise" (e.g. \`/the-module\`, \`/the-module/:id\`), NOT \`/\`.
 - The test file lives in \`__tests__/\` — ONE directory deeper than the module — so shared-file imports need
   one more \`../\` than the module uses. If the module uses the database, \`import { runMigrations } from
   '../../../db.js'\` and call it in \`beforeAll(() => runMigrations())\` so the schema exists.
@@ -226,14 +227,14 @@ default-exported Hono app/router — never its internals. Derive every assertion
   assigned id/seq; a validation failure → 400 with an error; a list → 200 with an array in order).
 - One \`it()\` per behavior. Import ONLY vitest and the module under test — no external packages.
 
-Example shape:
+Example shape (module mounted at \`/the-module\`):
 \`\`\`ts
 import { describe, it, expect, beforeAll } from 'vitest';
 import mod from '../the-module.js';
 import { runMigrations } from '../../../db.js';
 beforeAll(() => runMigrations());
 it('appends an operation and returns 201 with a seq', async () => {
-  const res = await mod.request('/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'set-content', payload: {} }) });
+  const res = await mod.request('/the-module', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'set-content', payload: {} }) });
   expect(res.status).toBe(201);
   const op = await res.json();
   expect(op.seq).toBeGreaterThan(0);
