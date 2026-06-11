@@ -10,7 +10,7 @@
  * check is named.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -111,7 +111,22 @@ export async function runAcceptance(opts: AcceptanceOptions): Promise<Acceptance
     return { ok: checks.every(c => c.ok), checks };
   }
 
-  // 2 + 3. Boot the server and probe a route.
+  // 2. Run the generated test suite (unit_tests evidence). The generated tests
+  // exist but were never executed; running them is what gives them teeth.
+  const vitestBin = join(opts.projectRoot, 'node_modules', '.bin', 'vitest');
+  if (existsSync(vitestBin)) {
+    try {
+      execFileSync(vitestBin, ['run'], { cwd: opts.projectRoot, stdio: 'pipe', timeout: 120_000 });
+      checks.push({ name: 'unit_tests', ok: true, detail: 'generated tests pass' });
+    } catch (e) {
+      const out = (e as { stdout?: Buffer }).stdout?.toString().trim().slice(-300) ?? '';
+      checks.push({ name: 'unit_tests', ok: false, detail: `generated tests failed${out ? ` — ${out}` : ''}` });
+    }
+  } else {
+    checks.push({ name: 'unit_tests', ok: false, detail: 'vitest not installed (provision deps)' });
+  }
+
+  // 3 + 4. Boot the server and probe a route.
   const boot = opts.bootCommand ?? resolveBootCommand(opts.projectRoot);
   if (!boot) {
     checks.push({ name: 'boot', ok: false, detail: 'no boot command (install deps / add a start script)' });

@@ -214,6 +214,31 @@ router.delete('/:id', (c) => {
 \`\`\`
 `;
 
+const TEST_GUIDANCE = `Write vitest behavioral tests that exercise the module through its PUBLIC INTERFACE only — its
+default-exported Hono app/router — never its internals. Derive every assertion from the requirements.
+
+- Import the module's default export and drive it in-process with \`app.request(path, init)\` — no network, no
+  server, no port.
+- If the module uses the database, \`import { runMigrations } from '../../db.js'\` and call it in
+  \`beforeAll(() => runMigrations())\` so the schema exists.
+- Assert HTTP status codes and JSON response shapes for each requirement (successful create → 201 with the
+  assigned id/seq; a validation failure → 400 with an error; a list → 200 with an array in order).
+- One \`it()\` per behavior. Import ONLY vitest and the module under test — no external packages.
+
+Example shape:
+\`\`\`ts
+import { describe, it, expect, beforeAll } from 'vitest';
+import mod from '../the-module.js';
+import { runMigrations } from '../../db.js';
+beforeAll(() => runMigrations());
+it('appends an operation and returns 201 with a seq', async () => {
+  const res = await mod.request('/', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'set-content', payload: {} }) });
+  expect(res.status).toBe(201);
+  const op = await res.json();
+  expect(op.seq).toBeGreaterThan(0);
+});
+\`\`\``;
+
 // ─── Export ─────────────────────────────────────────────────────────────────
 
 export const nodeTypescript: RuntimeTarget = {
@@ -245,6 +270,7 @@ export const nodeTypescript: RuntimeTarget = {
   moduleTemplate: MODULE_TEMPLATE,
   promptExtension: PROMPT_EXTENSION,
   codeExamples: CODE_EXAMPLES,
+  testGuidance: TEST_GUIDANCE,
 
   sharedFiles: {
     'src/db.ts': DB_FILE,

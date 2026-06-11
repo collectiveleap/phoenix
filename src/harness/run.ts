@@ -31,6 +31,7 @@ import { writeScaffoldFiles, pruneScaffoldFiles } from './scaffold-writer.js';
 import { provision } from './provision.js';
 import { runAcceptance } from './acceptance.js';
 import { checkInterfaceContracts } from './contract-check.js';
+import { produceEvidence, evaluateEvidence } from './evidence-gate.js';
 import type { AcceptanceResult } from './acceptance.js';
 import { computeResumePlan } from './resume.js';
 import type { RunPolicy } from './policy.js';
@@ -287,7 +288,21 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       journal.event('contract_violations', { count: contract.violations.length, violations: contract.violations });
     }
 
-    const gateOk = acceptance.ok && contract.ok;
+    // Evidence policy (PRD: code → evidence → policy decision). Turn the gate's
+    // checks into per-IU evidence and evaluate each module's declared policy: a
+    // required type that was produced and FAILED makes the run not verified;
+    // a type not produced this run is reported INCOMPLETE (surfaced, not fatal).
+    const evidence = produceEvidence(ius, acceptance.checks, contract.violations, new Date().toISOString());
+    const ev = evaluateEvidence(ius, evidence);
+    journal.event('evidence_policy', {
+      verdicts: ev.verdicts.map(v => ({ iu: v.iu_name, verdict: v.verdict, satisfied: v.satisfied, missing: v.missing, failed: v.failed })),
+    });
+    for (const v of ev.verdicts) {
+      if (v.verdict === 'FAIL') log(`  ✖ evidence(${v.iu_name}): failed ${v.failed.join(', ')}`);
+      else if (v.verdict === 'INCOMPLETE') log(`  • evidence(${v.iu_name}): incomplete — ${v.missing.join(', ')} not produced (run --runtime-checks)`);
+    }
+
+    const gateOk = acceptance.ok && contract.ok && !ev.anyFailed;
     journal.endStage('acceptance', gateOk ? 'ok' : 'failed', {
       checks: acceptance.checks.map(c => ({ name: c.name, ok: c.ok })),
     });

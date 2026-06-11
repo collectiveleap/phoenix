@@ -16,7 +16,7 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt } from './llm/prompt.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import type { InterfaceEntry } from './scaffold.js';
 import { sha256 } from './semhash.js';
@@ -160,6 +160,23 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
     files.set(outputPath, content);
   }
 
+  // Behavioral tests (Phase 2): for provider (api) modules, compile a test file
+  // from the spec — independent of the code just generated. The smoke test stays
+  // as the floor; this adds real behavioral assertions.
+  if (ctx?.llm && ctx.canonNodes && ctx.target) {
+    const entry = ctx.interfaces?.find(e => e.iu_id === iu.iu_id);
+    const out = iu.output_files[0];
+    if (entry?.role === 'api' && entry.contract && out) {
+      const dir = out.split('/').slice(0, -1).join('/');
+      const base = out.split('/').pop()!.replace(/\.ts$/, '');
+      const testCode = await generateTestsWithLLM(iu, ctx, `../${base}.js`, entry.contract);
+      if (testCode) {
+        files.set(`${dir}/__tests__/${base}.behavior.test.ts`, testCode);
+        ctx.journal?.event('behavioral_tests', { iu: iu.name, module: base });
+      }
+    }
+  }
+
   // Build manifest entries
   const fileEntries: Record<string, FileManifestEntry> = {};
   for (const [path, content] of files) {
@@ -210,6 +227,42 @@ function pickModelForIU(iu: ImplementationUnit, ctx: RegenContext): string | und
   if (!ctx.modelsByRole) return undefined;
   const role = ctx.interfaces?.find(e => e.iu_id === iu.iu_id)?.role;
   return role ? ctx.modelsByRole[role] : undefined;
+}
+
+/**
+ * Generate a module's behavioral test file FROM ITS SPEC (Phase 2 of
+ * GENERATED-EVIDENCE). Independent of the generated implementation — the prompt
+ * is built from the canonical clauses + the module's interface, never the code,
+ * so the tests assert intended behavior rather than mirroring the implementation.
+ * Best-effort: any failure (no LLM, truncation, over-budget) returns null and
+ * leaves the smoke test as the floor — a missing test never blocks the module.
+ */
+async function generateTestsWithLLM(
+  iu: ImplementationUnit,
+  ctx: RegenContext,
+  importPath: string,
+  contract: import('./models/interface-contract.js').InterfaceContract | undefined,
+): Promise<string | null> {
+  const { llm, canonNodes = [], target, journal, budgets } = ctx;
+  if (!llm || !target) return null;
+  const prompt = buildTestPrompt(iu, canonNodes, importPath, contract, target);
+  const opts: GenerateOptions = {
+    system: getTestSystemPrompt(target),
+    temperature: 0.2,
+    maxTokens: ctx.maxTokens ?? GENERATE_MAX_TOKENS,
+    model: pickModelForIU(iu, ctx),
+  };
+  const cc = { stage: 'generate-tests', target: iu.name, attempt: 0 };
+  try {
+    let raw: string;
+    if (journal && budgets) raw = await supervisedGenerate(journal, llm, prompt, opts, cc, { budgets });
+    else if (journal) raw = await recordedGenerate(journal, llm, prompt, opts, cc);
+    else raw = await llm.generate(prompt, opts);
+    const code = cleanCodeResponse(raw);
+    return code && code.trim().length > 0 ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -71,6 +71,12 @@ export interface RuntimeTarget {
   promptExtension: string;
   /** Few-shot code examples showing the exact patterns */
   codeExamples: string;
+  /**
+   * How to write behavioral tests for a module in this target — exercised through
+   * the module's public interface, never its internals (so generated tests assert
+   * the spec, not the implementation). Absent ⇒ only the smoke test is produced.
+   */
+  testGuidance?: string;
 
   /** Shared boilerplate files: relative path → file content */
   sharedFiles: Record<string, string>;

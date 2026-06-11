@@ -527,12 +527,20 @@ function deriveRiskTier(nodes: CanonicalNode[]): 'low' | 'medium' | 'high' | 'cr
   return 'low';
 }
 
+/**
+ * Required evidence per risk tier. Declares ONLY evidence Phoenix actually
+ * produces and the gate evaluates — `typecheck`, `boundary_validation`, and
+ * (medium+) `unit_tests`. A module must not declare evidence the pipeline won't
+ * check (`lint`/`property_tests`/`static_analysis`/`human_signoff`): a policy
+ * that lists unproduced types is dishonest — it lets "verified" assert nothing.
+ * Re-add a type here only once a producer exists for it.
+ */
 function evidenceForTier(tier: string): string[] {
   switch (tier) {
-    case 'low': return ['typecheck', 'lint', 'boundary_validation'];
-    case 'medium': return ['typecheck', 'lint', 'boundary_validation', 'unit_tests'];
-    case 'high': return ['typecheck', 'lint', 'boundary_validation', 'unit_tests', 'property_tests', 'static_analysis'];
-    case 'critical': return ['typecheck', 'lint', 'boundary_validation', 'unit_tests', 'property_tests', 'static_analysis', 'human_signoff'];
+    case 'low': return ['typecheck', 'boundary_validation'];
+    case 'medium': return ['typecheck', 'boundary_validation', 'unit_tests'];
+    case 'high': return ['typecheck', 'boundary_validation', 'unit_tests'];
+    case 'critical': return ['typecheck', 'boundary_validation', 'unit_tests'];
     default: return ['typecheck'];
   }
 }

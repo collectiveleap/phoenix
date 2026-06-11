@@ -9,6 +9,7 @@ import type { ImplementationUnit } from '../models/iu.js';
 import type { CanonicalNode } from '../models/canonical.js';
 import type { ResolvedTarget } from '../models/architecture.js';
 import type { InterfaceEntry } from '../scaffold.js';
+import type { InterfaceContract } from '../models/interface-contract.js';
 
 export const SYSTEM_PROMPT = `You are a senior TypeScript engineer generating production-quality module implementations for Phoenix VCS.
 
@@ -196,5 +197,66 @@ export function buildPrompt(
 
   lines.push('Output the complete TypeScript module now.');
 
+  return lines.join('\n');
+}
+
+/** System prompt for generating behavioral tests (independent of the implementation). */
+export function getTestSystemPrompt(target?: ResolvedTarget | null): string {
+  const lang = target?.runtime.language ?? 'TypeScript';
+  return `You are a senior ${lang} engineer writing behavioral tests with vitest.
+
+Rules:
+- Output ONLY the test module code. No markdown fences, no explanation.
+- Test the module through its PUBLIC INTERFACE only — do NOT reference or assume its implementation internals.
+- Every assertion must come from the stated requirements (the spec), not from how the code happens to work.
+- Import ONLY vitest and the module under test (and the architecture's declared test helpers). No other packages.`;
+}
+
+/**
+ * Build the prompt for generating a module's behavioral tests FROM ITS SPEC —
+ * deliberately WITHOUT the generated implementation, so the tests assert the
+ * intended behavior rather than mirroring whatever the code does (independence).
+ */
+export function buildTestPrompt(
+  iu: ImplementationUnit,
+  canonNodes: CanonicalNode[],
+  importPath: string,
+  contract: InterfaceContract | undefined,
+  target?: ResolvedTarget | null,
+): string {
+  const lines: string[] = [];
+  lines.push(`Write a vitest behavioral test file for the "${iu.name}" module, from its SPECIFICATION below — NOT its implementation (you are not shown the implementation on purpose).`);
+  lines.push('');
+  lines.push(`## Import the module under test`);
+  lines.push('```');
+  lines.push(`import mod from '${importPath}';`);
+  lines.push('```');
+  lines.push('');
+
+  const iuNodes = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id));
+  const requirements = iuNodes.filter(n => n.type === 'REQUIREMENT' || n.type === 'CONSTRAINT' || n.type === 'INVARIANT');
+  if (requirements.length > 0) {
+    lines.push('## Requirements — write at least one assertion for each:');
+    for (const r of requirements) lines.push(`- ${r.statement}`);
+    lines.push('');
+  }
+
+  if (contract && contract.operations.length > 0) {
+    lines.push('## Endpoints to exercise (the module mounts these at its root):');
+    for (const op of contract.operations) {
+      const ad = op.address as { method?: string; path?: string } | undefined;
+      lines.push(`- ${ad?.method ?? ''} ${ad?.path ?? ''} — ${op.purpose}`);
+    }
+    if (contract.shape) lines.push(`- shape: ${contract.shape}`);
+    lines.push('');
+  }
+
+  if (target?.runtime.testGuidance) {
+    lines.push('## How to write tests for this architecture:');
+    lines.push(target.runtime.testGuidance);
+    lines.push('');
+  }
+
+  lines.push('Output the complete test module now.');
   return lines.join('\n');
 }
