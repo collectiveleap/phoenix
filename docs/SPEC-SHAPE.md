@@ -51,5 +51,5 @@ spec stays the source of truth and you make the edit.
 
 ---
 
-See `change-notes/SPEC-SHAPE-FEEDBACK-OUTCOMES.md` for the outcomes this capability delivers
+See `https://github.com/collectiveleap/phoenix/issues/20` for the outcomes this capability delivers
 (F1–F5) and the incidents that motivated it.

@@ -1,5 +1,5 @@
 /**
- * Regression suite for the reference failures in change-notes/OBSERVABILITY-HARNESS-OUTCOMES.md
+ * Regression suite for the reference failures in https://github.com/collectiveleap/phoenix/issues/17
  * (Appendix #1–#10). Each test reproduces a failure mode from the stress-test
  * session and asserts the harness now prevents or auto-recovers from it (O16),
  * leaving a journal entry where applicable.

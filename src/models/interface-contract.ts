@@ -7,7 +7,7 @@
  * contract, but a module-to-module RUNTIME interface (a web-ui calling a resource
  * module) had no declared, enforced contract — so a consumer could invent an
  * address the provider doesn't serve (the outliner `/operations` vs `/outliner-store`
- * 404). See change-notes/CROSS-MODULE-CONTRACT-DIAGNOSIS.md.
+ * 404). See https://github.com/collectiveleap/phoenix/issues/12.
  *
  * The model here is TRANSPORT-NEUTRAL: an interface is a set of named operations
  * with a shape and a hash. HOW an operation is addressed and invoked (REST URL +

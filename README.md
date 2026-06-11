@@ -2,6 +2,8 @@
 
 **Regenerative version control that compiles intent to working software.**
 
+> 🐛 Found a bug or have a request? See **[CONTRIBUTING.md](CONTRIBUTING.md)** for how to file an issue.
+
 Phoenix takes a specification written in plain language, extracts structured requirements, and generates a working application — database, API, validation, and UI — with full traceability from every line of spec to every line of generated code.
 
 ```

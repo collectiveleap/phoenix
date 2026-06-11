@@ -1,12 +1,12 @@
 #!/bin/sh
-# Decisive evidence for PROVIDER-STREAMING-DIAGNOSIS.md, made runnable.
+# Decisive evidence for https://github.com/collectiveleap/phoenix/issues/19, made runnable.
 #
 # Confirms the ONLY variable that changes the outcome is `--output-format
 # stream-json`: default text mode buffers a large output to 0 bytes until
 # completion (watchdog reads that as a startup stall and kills it), while
 # stream-json emits a first byte in ~2s and streams throughout.
 #
-# Usage:  sh change-notes/repro-streaming.sh
+# Usage:  sh scripts/repro-streaming.sh
 # Needs:  a working `claude` on PATH (or a known install location).
 
 set -u

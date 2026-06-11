@@ -1,6 +1,6 @@
 /**
  * Output-token budget for large modules — evidence for T1–T5.
- * See change-notes/TOKEN-BUDGET-DIAGNOSIS.md.
+ * See https://github.com/collectiveleap/phoenix/issues/21.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';

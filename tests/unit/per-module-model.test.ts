@@ -1,6 +1,6 @@
 /**
  * G2 — per-module model selection (role-based) + G3 default resolution.
- * See change-notes/GENERATION-RELIABILITY-OUTCOMES.md.
+ * See https://github.com/collectiveleap/phoenix/issues/15.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';

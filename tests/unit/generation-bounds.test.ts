@@ -1,6 +1,6 @@
 /**
  * G4 — Phoenix-side generation bounds + capture + diagnosability.
- * See change-notes/GENERATION-RELIABILITY-OUTCOMES.md and LARGE-MODULE-GENERATION-DIAGNOSIS.md.
+ * See https://github.com/collectiveleap/phoenix/issues/15 and https://github.com/collectiveleap/phoenix/issues/8.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, existsSync, readFileSync } from 'node:fs';

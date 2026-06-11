@@ -4,13 +4,13 @@
  * Gated: runs only when `PHOENIX_E2E=1` and a `claude` binary resolves — it
  * spawns the real CLI and takes seconds/minutes, so it is opt-in and never part
  * of the default unit run. It is the automatable proxy for the diagnosis's
- * decisive evidence (PROVIDER-STREAMING-DIAGNOSIS.md): a large-output prompt
+ * decisive evidence (https://github.com/collectiveleap/phoenix/issues/19): a large-output prompt
  * must stream from ~2s with rising bytes, not sit at 0 bytes until completion.
  *
  * Enable:  PHOENIX_E2E=1 node node_modules/vitest/vitest.mjs run tests/e2e/claude-streaming.e2e.test.ts
  *
  * The full S5 acceptance (a `phoenix run` web-UI module booting hands-off) is a
- * manual procedure — see change-notes/repro-streaming.sh.
+ * manual procedure — see scripts/repro-streaming.sh.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveClaudePath, ClaudeCliProvider } from '../../src/llm/claude-cli.js';
