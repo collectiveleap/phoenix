@@ -12,6 +12,7 @@ import { generateIU, stripOverlap } from '../../src/regen.js';
 import { planIUs } from '../../src/iu-planner.js';
 import { parseSpec } from '../../src/spec-parser.js';
 import { extractCanonicalNodes } from '../../src/canonicalizer.js';
+import { resolveTarget } from '../../src/architectures/index.js';
 import { RunJournal } from '../../src/observe/journal.js';
 import type { LLMProvider, GenerateOptions, StreamHooks } from '../../src/llm/provider.js';
 
@@ -116,5 +117,37 @@ describe('#24: stripOverlap removes a duplicated seam', () => {
     expect(stripOverlap('abc', 'abcdef')).toBe('def');     // full re-emit of the tail
     expect(stripOverlap('foo', 'bar')).toBe('bar');         // no overlap → unchanged
     expect(stripOverlap('', 'anything')).toBe('anything');  // nothing to overlap
+  });
+
+  it('dedups a FULL restart larger than any fixed window (the larger-spec bug)', () => {
+    // The model re-emits everything produced so far (>4 KB) then continues — a fixed-cap
+    // scan would miss it and duplicate the whole module. The KMP overlap is unbounded.
+    const accumulated = 'x'.repeat(5000) + 'END';
+    const restart = accumulated + ' TAIL';
+    expect(stripOverlap(accumulated, restart)).toBe(' TAIL');
+  });
+});
+
+describe('#24: a continuation that restarts is assembled without duplication (template mode)', () => {
+  it('produces one coherent module even when a large chunk re-emits everything first', async () => {
+    const target = resolveTarget('web-api/node-typescript')!;
+    const clauses = parseSpec('# Web Experience\n\nThe page must render the outline at GET /.', 'web.md');
+    const canon = extractCanonicalNodes(clauses);
+    const ius = planIUs(canon, clauses, { roleSurfaces: target.architecture.roleSurfaces });
+    const iu = ius[0];
+
+    const big = 'A'.repeat(5000); // > any fixed dedup window
+    const c0 = `router.get('/', (c) => c.html(\`<!DOCTYPE html><body>${big}`;          // truncated mid-string
+    const c1 = `${c0}BBB</body></html>\`));`;                                            // RESTART: re-emits c0, then finishes
+    const provider = new ChunkProvider([{ text: c0, truncated: true }, { text: c1, truncated: false }]);
+
+    const result = await generateIU(iu, { llm: provider, canonNodes: canon, allIUs: ius, target });
+    const code = result.files.get(iu.output_files[0])!;
+
+    expect(result.failed).toBeUndefined();
+    expect((code.match(/router\.get\('\/'/g) ?? []).length).toBe(1);   // not duplicated by the restart
+    expect(code.split(big).length).toBe(2);                            // the big block appears exactly once
+    expect((code.match(/`/g) ?? []).length % 2).toBe(0);               // template literal stays balanced
+    expect(code).toContain('BBB</body></html>');                       // the continuation tail is present
   });
 });

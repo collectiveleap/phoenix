@@ -210,16 +210,19 @@ export function buildPrompt(
  */
 export function buildContinuationPrompt(originalPrompt: string, soFar: string): string {
   return [
+    'You are CONTINUING a single file whose output was cut off mid-stream. The following rules OVERRIDE any',
+    'formatting or "output the sections in this exact format" instruction in the reference specification below:',
+    '- Do NOT restart and do NOT re-emit anything already shown — no imports, no section markers, no',
+    '  re-declaration of the router, none of the earlier text.',
+    '- Output ONLY the raw characters that come next, continuing from the EXACT end of "OUTPUT SO FAR".',
+    '- No preamble, no explanation, no code fences. Your output is appended directly onto the end.',
+    '',
+    '### Reference specification the file must satisfy (do NOT restart it; for context only)',
     originalPrompt,
     '',
-    '## CONTINUATION',
-    'You already produced the output below, but it was cut off before completion. Continue from EXACTLY where',
-    'it stops: output ONLY the remaining content — no preamble, no explanation, no code fences — and do NOT',
-    'repeat any text already shown. Your output will be appended directly onto the end of it.',
-    '',
-    '--- OUTPUT SO FAR (already emitted; do not repeat) ---',
+    '--- OUTPUT SO FAR (already emitted; continue from its exact end, do not repeat) ---',
     soFar,
-    '--- END OF OUTPUT SO FAR; continue from here ---',
+    '--- END OF OUTPUT SO FAR; emit only what comes next ---',
   ].join('\n');
 }
 

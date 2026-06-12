@@ -482,17 +482,29 @@ export function budgetsForModel(budgets: HealthBudgets, model: string | undefine
 const DEFAULT_MAX_CONTINUATIONS = 4;
 
 /**
- * Strip the seam overlap when appending a continuation chunk (#24): if the model
- * re-emitted some of the tail it was shown, drop the longest suffix of `accumulated`
- * that is a prefix of `chunk`, so the concatenation never duplicates at the join.
- * Bounded scan (the overlap is at the seam, not arbitrarily deep).
+ * Strip the seam overlap when appending a continuation chunk (#24): drop the longest
+ * prefix of `chunk` that is also a suffix of `accumulated`, so the concatenation never
+ * duplicates at the join. This must handle a model that **restarts** — re-emitting the
+ * entire prior output before continuing — so the scan is UNBOUNDED (a fixed cap silently
+ * duplicates everything once the output is larger than the cap). Linear time via the KMP
+ * prefix function over `head + sep + tail`, where the value at the end is exactly the
+ * longest prefix-of-chunk that is a suffix-of-accumulated.
  */
 export function stripOverlap(accumulated: string, chunk: string): string {
-  const max = Math.min(accumulated.length, chunk.length, 4000);
-  for (let k = max; k > 0; k--) {
-    if (accumulated.endsWith(chunk.slice(0, k))) return chunk.slice(k);
+  if (!accumulated || !chunk) return chunk;
+  const L = Math.min(accumulated.length, chunk.length);
+  const head = chunk.slice(0, L);                            // prefix of the new chunk
+  const tail = accumulated.slice(accumulated.length - L);    // suffix of what we have
+  const sep = String.fromCharCode(0);                        // NUL — cannot occur in source code
+  const s = head + sep + tail;
+  const pi = new Array<number>(s.length).fill(0);
+  for (let i = 1; i < s.length; i++) {
+    let j = pi[i - 1];
+    while (j > 0 && s[i] !== s[j]) j = pi[j - 1];
+    if (s[i] === s[j]) j++;
+    pi[i] = j;
   }
-  return chunk;
+  return chunk.slice(pi[s.length - 1]); // overlap length ≤ L (the separator blocks crossing)
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
