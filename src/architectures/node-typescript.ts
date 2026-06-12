@@ -134,6 +134,11 @@ router.delete('/:id', (c) => { ... });
 - Return c.html() with a complete HTML document
 - Use fetch('/resource-name') to call sibling API modules (no /api/ prefix)
 - Include ALL CSS and JavaScript inline
+- Implement EVERY behavior each interaction clause states — all of its sub-cases, not a subset. If a clause
+  describes a fork (an action behaves one way on a line with text and another on an empty line), both directions
+  of a gesture (click left → caret to start AND click right → caret to end), or a "live / on every keystroke"
+  update, implement ALL branches. Partially implementing a stated behavior (one branch working, the other a
+  no-op) is a defect, not an acceptable simplification.
 
 ### Web interface — render robustness (the page replays the whole server log on every load)
 - NEVER reuse a stateful global (\`/g\`) regex across nested calls. A \`while ((m = re.exec(s)))\` loop whose body
@@ -272,6 +277,16 @@ never its internals. Derive every assertion from the requirements; the rendered 
   \`keyboard.press(...)\`) and assert the observable outcome with auto-waiting (\`await expect(...).toBeVisible()\`).
 - One \`test()\` per observable behavior. Cover the round-trips the requirements imply (e.g. create an item →
   it appears in the list; an invalid input → an error message is shown).
+- Wait for the page to be interactive BEFORE acting: after \`goto('/')\`, \`await expect(...).toBeVisible()\` on a
+  known ready element (the one you will act on) before any \`keyboard\`/typing — never type immediately after
+  \`goto\`, or handlers may not be wired yet and the test races.
+- Make each test SELF-CONTAINED and order-independent: create the data it needs inside the test with a UNIQUE
+  value (e.g. a per-test label), and assert only on what it created. The app may share one persistent store
+  across tests, so never depend on data from another test or on execution order.
+- Cover EACH behavior clause — including every branch and direction — with its own scenario: a fork (e.g. an
+  action on a line WITH text vs an EMPTY line), both directions of a gesture (left vs right, open vs close), and
+  any "live / on every keystroke" update each get a scenario. A missing branch must surface as a failing
+  scenario, not a silent gap.
 
 Example shape:
 \`\`\`ts
