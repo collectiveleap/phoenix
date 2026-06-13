@@ -693,7 +693,9 @@ export const WEBUI_STRATEGIES: Record<string, WebUIStrategy> = {
   'plan-split': planSplitStrategy,
   bramble: brambleStrategy,
 };
-const DEFAULT_WEBUI_STRATEGY = 'inline-slice';
+// plan-split is the default for oversized web-ui: it's the only GENERAL strategy that clears the
+// pre-first-token stall at full spec size (A/B evidence, #27) — single/inline-slice both fail there.
+const DEFAULT_WEBUI_STRATEGY = 'plan-split';
 
 /** Resolve the active strategy from `PHOENIX_WEBUI_STRATEGY` (default = current behaviour). */
 export function selectWebUIStrategy(name?: string): WebUIStrategy {

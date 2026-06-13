@@ -1534,14 +1534,14 @@ async function cmdWebUICompare(args: string[]): Promise<void> {
 
 /** List the web-ui generation strategies (#27), tagged general vs spec-specific, with the active one. */
 function cmdWebUIStrategies(): void {
-  const active = process.env.PHOENIX_WEBUI_STRATEGY ?? 'inline-slice';
+  const active = process.env.PHOENIX_WEBUI_STRATEGY ?? 'plan-split';
   console.log('\nWeb-UI generation strategies (#27 experiment harness)\n');
   for (const [name, s] of Object.entries(WEBUI_STRATEGIES)) {
     const tag = s.general ? green('general') : yellow('spec-specific');
     const mark = name === active ? blue(' ← active') : '';
     console.log(`  ${name.padEnd(14)} ${tag}${mark}`);
   }
-  console.log('\n  select with PHOENIX_WEBUI_STRATEGY=<name> (default: inline-slice)');
+  console.log('\n  select with PHOENIX_WEBUI_STRATEGY=<name> (default: plan-split)');
   console.log('  per-run metrics are journalled as `webui_strategy` — run the same spec under each to A/B.\n');
 }
 

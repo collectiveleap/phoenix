@@ -65,11 +65,11 @@ function iuWithBehaviours(n: number): { iu: ImplementationUnit; canon: Canonical
 afterEach(() => { delete process.env.PHOENIX_WEBUI_STRATEGY; delete process.env.PHOENIX_WEBUI_SLICE_TOKENS; });
 
 describe('#27 harness: selection + registry', () => {
-  it('defaults to inline-slice; selects by name; unknown falls back; tracks general/specific', () => {
-    expect(selectWebUIStrategy().name).toBe('inline-slice');
+  it('defaults to plan-split; selects by name; unknown falls back; tracks general/specific', () => {
+    expect(selectWebUIStrategy().name).toBe('plan-split'); // the general strategy that clears the stall (#27)
     expect(selectWebUIStrategy('single').name).toBe('single');
-    expect(selectWebUIStrategy('plan-split').name).toBe('plan-split');
-    expect(selectWebUIStrategy('does-not-exist').name).toBe('inline-slice');
+    expect(selectWebUIStrategy('inline-slice').name).toBe('inline-slice');
+    expect(selectWebUIStrategy('does-not-exist').name).toBe('plan-split');
     expect(WEBUI_STRATEGIES['plan-split'].general).toBe(true);
     expect(WEBUI_STRATEGIES['bramble'].general).toBe(false); // spec-specific, tracked
   });
