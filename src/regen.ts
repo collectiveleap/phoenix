@@ -16,7 +16,8 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt, buildShellPrompt, buildSlicePrompt } from './llm/prompt.js';
+import { CanonicalType } from './models/canonical.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import { DEFAULT_ROLE_SURFACES } from './models/architecture.js';
 import type { InterfaceContract } from './models/interface-contract.js';
@@ -155,8 +156,16 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
         }
         const msg = err instanceof Error ? err.message : String(err);
         ctx.onProgress?.(iu, 'error', msg);
-        // Fall back to stub on other (transient) LLM failures.
-        content = ctx.target ? generateArchStub(iu) : generateModule(iu);
+        // A generation that failed after retries — e.g. a pre-first-token stall that the
+        // watchdog SIGKILLed (#27 B2) — must FAIL the generate stage, not silently substitute
+        // a mountable stub that reads as a clean ✔ (the gap #9 names). Capture any partial.
+        const partial = (err as { partialText?: string }).partialText;
+        const partialPath = partial ? writePartial(ctx, iu, outputPath, partial) : undefined;
+        const remediation =
+          `${iu.name} did not generate — ${msg}. Narrow or split the spec section, or improve ` +
+          `first-token reliability, then re-run (no stub is substituted).`;
+        ctx.journal?.event('module_failed', { iu: iu.name, reason: 'generation_failed', remediation, partialPath });
+        return failedResult(iu, modelId, 'generation_failed', remediation, partialPath);
       }
     } else {
       content = ctx?.target ? generateArchStub(iu) : generateModule(iu);
@@ -478,6 +487,19 @@ export function budgetsForModel(budgets: HealthBudgets, model: string | undefine
   };
 }
 
+/**
+ * Give a large prompt more first-content room (#27 Phase 3): a big prompt legitimately takes
+ * longer to reach first token, so scale `startupMs` with prompt size above a small baseline,
+ * capped. Complements plan-split for any module still generated in one large call. Env-tunable
+ * (`PHOENIX_STARTUP_MS_PER_KB`).
+ */
+export function budgetsForPrompt(budgets: HealthBudgets, promptBytes: number): HealthBudgets {
+  const perKbMs = Number(process.env.PHOENIX_STARTUP_MS_PER_KB) || 1500;
+  const overKb = Math.max(0, promptBytes / 1024 - 4);
+  const extra = Math.min(overKb * perKbMs, 180_000);
+  return extra > 0 ? { ...budgets, startupMs: budgets.startupMs + extra } : budgets;
+}
+
 /** Default continuation-round cap before a non-converging generation hard-fails. */
 const DEFAULT_MAX_CONTINUATIONS = 4;
 
@@ -505,6 +527,41 @@ export function stripOverlap(accumulated: string, chunk: string): string {
     pi[i] = j;
   }
   return chunk.slice(pi[s.length - 1]); // overlap length ≤ L (the separator blocks crossing)
+}
+
+/** Marker the shell emits where per-capability handler slices are spliced in (#27). */
+const HANDLERS_MARKER = '/* __HANDLERS__ */';
+/** Behaviour clauses per web-ui slice — bounds each slice prompt so it reaches first-token. */
+const WEBUI_SLICE_CLAUSES = Number(process.env.PHOENIX_WEBUI_SLICE_CLAUSES) || 5;
+
+/**
+ * Group a web-ui IU's behaviour clauses into bounded slices (#27 plan-split). Each slice is a
+ * small clause group so its generation prompt reaches first-token fast (the single mega-prompt
+ * is what stalls). Chunk-by-count: deterministic and independent of sub-heading availability.
+ */
+export function chunkWebUINodes(iu: ImplementationUnit, canonNodes: CanonicalNode[]): CanonicalNode[][] {
+  const own = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id));
+  const behaviors = own.filter(n =>
+    n.type === CanonicalType.REQUIREMENT || n.type === CanonicalType.CONSTRAINT || n.type === CanonicalType.INVARIANT);
+  const pool = behaviors.length ? behaviors : own;
+  const groups: CanonicalNode[][] = [];
+  for (let i = 0; i < pool.length; i += WEBUI_SLICE_CLAUSES) groups.push(pool.slice(i, i + WEBUI_SLICE_CLAUSES));
+  return groups.length ? groups : [[]];
+}
+
+/**
+ * Compose the shell + handler slices (#27): splice the joined slice blocks into the shell's
+ * `/* __HANDLERS__ *​/` marker. If the shell omitted the marker, insert before the last
+ * `</script>` (never drop a slice) and record it — a botched compose then fails the typecheck
+ * gate / generate stage rather than silently shipping incomplete behaviour.
+ */
+export function composeWebUI(shell: string, blocks: string[], journal?: RunJournal, iuName = ''): string {
+  const joined = blocks.filter(b => b.trim()).join('\n\n');
+  if (shell.includes(HANDLERS_MARKER)) return shell.replace(HANDLERS_MARKER, joined);
+  journal?.event('webui_marker_missing', { iu: iuName });
+  const idx = shell.lastIndexOf('</script>');
+  if (idx >= 0) return shell.slice(0, idx) + '\n' + joined + '\n' + shell.slice(idx);
+  return shell + '\n' + joined;
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -544,7 +601,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
     if (journal && budgets) {
       // Size the first-content/duration budgets to the model actually running the
       // call (OP2) — opus needs longer to first content than the 60s default.
-      const callBudgets = budgetsForModel(budgets, opts.model ?? llm.model);
+      const callBudgets = budgetsForPrompt(budgetsForModel(budgets, opts.model ?? llm.model), Buffer.byteLength(p, 'utf8'));
       return supervisedGenerate(journal, llm, p, opts, { stage: 'generate', target: iu.name, attempt }, { budgets: callBudgets });
     }
     if (journal) {
@@ -581,10 +638,10 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   const continuationsEnabled = process.env.PHOENIX_GENERATE_CONTINUATIONS !== '0';
   const maxContinuations = Number(process.env.PHOENIX_GENERATE_MAX_CONTINUATIONS) || DEFAULT_MAX_CONTINUATIONS;
 
-  const generateRaw = async (opts: GenerateOptions): Promise<string> => {
+  const generateRaw = async (p: string, opts: GenerateOptions): Promise<string> => {
     let accumulated: string;
     try {
-      return await callLLM(prompt, opts, 0); // completed within bounds — no continuation
+      return await callLLM(p, opts, 0); // completed within bounds — no continuation
     } catch (err) {
       if (!continuationsEnabled || !isBounded(err)) throw err;
       accumulated = err.partialText ?? '';
@@ -594,7 +651,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
         iu: iu.name, round, bytesSoFar: Buffer.byteLength(accumulated, 'utf8'),
       });
       try {
-        const chunk = await callLLM(buildContinuationPrompt(prompt, accumulated), opts, round);
+        const chunk = await callLLM(buildContinuationPrompt(p, accumulated), opts, round);
         accumulated += stripOverlap(accumulated, chunk);
         journal?.event('generation_assembled', {
           iu: iu.name, totalBytes: Buffer.byteLength(accumulated, 'utf8'), continuations: round, converged: true,
@@ -613,9 +670,36 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
     throw capErr;
   };
 
+  // Plan-split (#27): a large web-ui module asks for one monster SPA in a single call and
+  // stalls pre-first-token. Generate it as a small page SHELL + bounded handler SLICES, each
+  // a prompt that reaches first-token fast, composed at the shell's marker. Triggered only for
+  // a web-ui IU whose estimated output exceeds the budget; small web-ui modules are unchanged.
+  const role = interfaces?.find(e => e.iu_id === iu.iu_id)?.role;
+  const estWebUIOutput = 6000 + iu.source_canon_ids.length * 1500; // mirrors estimateOutputTokens('web-ui', n)
+  const sliceThreshold = process.env.PHOENIX_WEBUI_SLICE_TOKENS !== undefined
+    ? Number(process.env.PHOENIX_WEBUI_SLICE_TOKENS) // explicit (incl. 0) — don't let `|| maxTokens` swallow it
+    : maxTokens;
+  const sliceWebUI = !!template && role === 'web-ui'
+    && process.env.PHOENIX_WEBUI_SLICE !== '0' && estWebUIOutput > sliceThreshold;
+
+  const generateWebUIBody = async (opts: GenerateOptions): Promise<string> => {
+    const groups = chunkWebUINodes(iu, canonNodes);
+    journal?.event('webui_shell', { iu: iu.name, slices: groups.length });
+    const shell = await generateRaw(buildShellPrompt(iu, canonNodes, siblingEntries, target), opts);
+    const blocks: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      journal?.event('webui_slice', { iu: iu.name, slice: i + 1, of: groups.length, clauses: groups[i].length });
+      const raw = await generateRaw(buildSlicePrompt(iu, groups[i], shell, target, i), opts);
+      blocks.push(cleanCodeResponse(raw));
+    }
+    const composed = composeWebUI(shell, blocks, journal, iu.name);
+    journal?.event('webui_composed', { iu: iu.name, slices: groups.length, totalBytes: Buffer.byteLength(composed, 'utf8') });
+    return composed;
+  };
+
   const generateOnce = async (): Promise<string> => {
     const opts: GenerateOptions = { system: systemPrompt, temperature: template ? 0.1 : 0.2, maxTokens, model };
-    const raw = await generateRaw(opts);
+    const raw = sliceWebUI ? await generateWebUIBody(opts) : await generateRaw(prompt, opts);
     return template ? assembleFromTemplate(template, raw, iu) : cleanCodeResponse(raw);
   };
 

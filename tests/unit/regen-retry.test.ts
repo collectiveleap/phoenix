@@ -66,7 +66,7 @@ describe('Generation retry (B6: ride out the intermittent startup hang)', () => 
     expect(events.filter(e => e.type === 'generate_retry')).toHaveLength(2);
   });
 
-  it('falls back to a stub only after exhausting maxRetries', async () => {
+  it('FAILS the generation after exhausting maxRetries — no silent stub (#27 B2)', async () => {
     const { iu, canon } = makeIU();
     const provider = new FlakyProvider(99, 'never returned');
     const result = await generateIU(iu, {
@@ -77,9 +77,10 @@ describe('Generation retry (B6: ride out the intermittent startup hang)', () => 
       backoffMs: 0,
     });
 
-    // 1 initial + 2 retries = 3 attempts, all fail → stub fallback.
+    // 1 initial + 2 retries = 3 attempts, all fail → hard-fail (a stub would read as a clean ✔).
     expect(provider.calls).toBe(3);
-    expect([...result.files.values()][0]).not.toContain('never returned');
+    expect(result.failed?.reason).toBe('generation_failed');
+    expect(result.files.size).toBe(0);
   });
 
   it('defaults maxRetries high enough to ride the startup hang (B6)', () => {

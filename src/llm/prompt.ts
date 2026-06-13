@@ -226,6 +226,69 @@ export function buildContinuationPrompt(originalPrompt: string, soFar: string): 
   ].join('\n');
 }
 
+/**
+ * Build the SHELL prompt for plan-split web-ui generation (#27): the full page skeleton
+ * (HTML + inline CSS + shared client state + load()/render() + event-binding scaffold) with
+ * a single `/* __HANDLERS__ *​/` marker where the interaction logic is later spliced in. The
+ * shell is small enough to reach first-token quickly, unlike the whole SPA in one call.
+ */
+export function buildShellPrompt(
+  iu: ImplementationUnit,
+  canonNodes: CanonicalNode[],
+  siblingModules: InterfaceEntry[] | undefined,
+  target: ResolvedTarget | null | undefined,
+): string {
+  return [
+    buildPrompt(iu, canonNodes, siblingModules, target),
+    '',
+    '## OVERRIDE: generate the page SHELL only (this large module is being built in slices)',
+    'Output the complete module, but generate ONLY the page shell — NOT the interaction logic:',
+    '- the full HTML document (doctype, <head> with inline <style>, <body> with the structural elements);',
+    '- the shared client-side STATE model, and a clear `render()` that draws state into the DOM;',
+    '- a `load()` that fetches initial data from the store and calls `render()`;',
+    '- the bare event-binding scaffold.',
+    'Where the interaction handlers (keyboard/mouse/editing behaviours) would be implemented, emit EXACTLY this',
+    'one line and nothing else in their place:',
+    '    /* __HANDLERS__ */',
+    'Do NOT implement the handlers — they are generated separately and will reuse the shared state and',
+    '`render()` you define here. Define that shared state and `render()` clearly so the handler slices can plug in.',
+  ].join('\n');
+}
+
+/**
+ * Build a SLICE prompt for plan-split web-ui generation (#27): implement one bounded group
+ * of behaviours as a self-contained JS block that plugs into the shell's `/* __HANDLERS__ *​/`
+ * marker, using the shell's shared state/render() as the contract. Bounded → fast first-token.
+ */
+export function buildSlicePrompt(
+  iu: ImplementationUnit,
+  sliceNodes: CanonicalNode[],
+  shellBody: string,
+  _target: ResolvedTarget | null | undefined,
+  index: number,
+): string {
+  return [
+    `You are implementing slice ${index + 1} of the interaction logic for the web page "${iu.name}".`,
+    "The page SHELL below is already generated — it defines the shared client-side state, `render()`, and `load()`.",
+    'Implement ONLY the behaviours listed below, as a self-contained block of client-side JavaScript (event',
+    "listeners + helper functions) that plugs in where the shell has `/* __HANDLERS__ */`, using the shell's",
+    'shared state and `render()`.',
+    '',
+    '### Rules',
+    '- Output ONLY the raw JavaScript to insert at the marker — no preamble, no explanation, no code fences, no',
+    '  `<script>` tags, no HTML. Do NOT re-emit any part of the shell.',
+    '- Reuse the shell\'s shared state and `render()`; do not redeclare them.',
+    '- This block sits INSIDE an inline `<script>` within a server-rendered HTML template literal — do not use',
+    '  unescaped backticks or `${...}`.',
+    '',
+    '### Behaviours to implement in this slice',
+    ...sliceNodes.map(n => `- [${n.type}] ${n.statement}`),
+    '',
+    '### Page shell (reference — defines the state/render contract; do NOT re-output it)',
+    shellBody,
+  ].join('\n');
+}
+
 export function getTestSystemPrompt(target?: ResolvedTarget | null): string {
   const lang = target?.runtime.language ?? 'TypeScript';
   return `You are a senior ${lang} engineer writing behavioral tests with vitest.
