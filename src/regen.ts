@@ -104,6 +104,10 @@ export interface RegenContext {
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
   /** Run-level logger for notable decisions (e.g. a web-ui being split into shell + slices). */
   log?: (message: string) => void;
+  /** Capture the web-ui strategy metrics (#27 A/B harness / `webui-compare`). */
+  onWebUIMetrics?: (metrics: WebUIMetrics) => void;
+  /** Skip behavioural-test + UI-scenario generation (e.g. when only comparing web-ui bodies). */
+  skipAuxGeneration?: boolean;
 }
 
 /**
@@ -179,7 +183,7 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
   // Behavioral tests (Phase 2): for provider (api) modules, compile a test file
   // from the spec — independent of the code just generated. The smoke test stays
   // as the floor; this adds real behavioral assertions.
-  if (ctx?.llm && ctx.canonNodes && ctx.target) {
+  if (ctx?.llm && ctx.canonNodes && ctx.target && !ctx.skipAuxGeneration) {
     const entry = ctx.interfaces?.find(e => e.iu_id === iu.iu_id);
     const out = iu.output_files[0];
     if (entry?.role === 'api' && entry.contract && out) {
@@ -841,6 +845,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       throw err; // #9: a strategy that can't produce hard-fails the module (no stub)
     } finally {
       journal?.event('webui_strategy', { iu: iu.name, ...m });
+      ctx.onWebUIMetrics?.(m);
     }
   };
 
@@ -1042,7 +1047,7 @@ const MINIMAL_TSCONFIG = JSON.stringify({
  * Returns a structured result distinguishing clean / type-errors / tool-
  * unavailable (the last is never treated as type errors — appendix #1).
  */
-function typecheckFile(
+export function typecheckFile(
   projectRoot: string,
   filePath: string,
   content: string,

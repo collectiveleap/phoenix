@@ -37,8 +37,9 @@ import { runSupervised, renderRunStatus } from './harness/run.js';
 import { loadPolicy, describePolicy } from './harness/policy.js';
 import { acquireRunLock, AlreadyRunningError } from './harness/lock.js';
 import { RunJournal } from './observe/journal.js';
-import { generateIU, generateAll, WEBUI_STRATEGIES } from './regen.js';
-import type { RegenContext } from './regen.js';
+import { generateIU, generateAll, WEBUI_STRATEGIES, typecheckFile } from './regen.js';
+import type { RegenContext, WebUIMetrics } from './regen.js';
+import { probeTypechecker } from './harness/typecheck.js';
 import { detectDrift } from './drift.js';
 import { extractDependencies } from './dep-extractor.js';
 import { validateBoundary } from './boundary-validator.js';
@@ -1448,6 +1449,89 @@ function cmdDrift(): void {
   }
 }
 
+/**
+ * Compare web-ui generation strategies in ONE command (#27): generate the web-ui module body
+ * under each listed strategy (skipping aux test-gen + the typecheck-repair loop for a fair raw
+ * comparison), per-output typecheck each, and print a table. Cost = N × web-ui generation only.
+ */
+async function cmdWebUICompare(args: string[]): Promise<void> {
+  const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  const list = args.find(a => !a.startsWith('-'));
+  const names = (list ? list.split(',') : Object.keys(WEBUI_STRATEGIES)).filter(n => WEBUI_STRATEGIES[n]);
+  if (names.length === 0) {
+    console.log(red(`✖ No valid strategies. Available: ${Object.keys(WEBUI_STRATEGIES).join(', ')}`));
+    process.exitCode = 1; return;
+  }
+  const ius = loadIUs(phoenixDir);
+  if (ius.length === 0) { console.log(yellow('⚠ No IUs planned. Run `phoenix plan` first.')); return; }
+  const llm = resolveProvider(phoenixDir);
+  if (!llm) { console.log(red('✖ webui-compare needs an LLM provider.')); process.exitCode = 1; return; }
+
+  let arch: ResolvedTarget | null = null;
+  const configPath = join(phoenixDir, 'config.json');
+  if (existsSync(configPath)) {
+    try { const cfg = JSON.parse(readFileSync(configPath, 'utf8')); if (cfg.architecture) arch = resolveTarget(cfg.architecture); } catch { /* ignore */ }
+  }
+  const canonNodes = new CanonicalStore(phoenixDir).getAllNodes();
+  const interfaces = deriveInterfaces(ius, canonNodes, arch);
+  const webIUs = ius.filter(iu => interfaces.find(e => e.iu_id === iu.iu_id)?.role === 'web-ui');
+  if (webIUs.length === 0) { console.log(yellow('⚠ No web-ui module in the plan.')); return; }
+  const policy = loadPolicy(phoenixDir);
+  const probe = probeTypechecker(projectRoot);
+
+  console.log(bold(`\n🔬 web-ui strategy comparison — ${names.join(', ')}\n`));
+  const prevStrategy = process.env.PHOENIX_WEBUI_STRATEGY;
+  const prevTokens = process.env.PHOENIX_WEBUI_SLICE_TOKENS;
+  process.env.PHOENIX_WEBUI_SLICE_TOKENS = '0'; // force the strategy path regardless of size
+
+  try {
+    for (const iu of webIUs) {
+      const original = existsSync(join(projectRoot, iu.output_files[0]))
+        ? readFileSync(join(projectRoot, iu.output_files[0]), 'utf8') : null;
+      console.log(bold(`  ${iu.name}`));
+      console.log(`  ${dim('strategy        general  calls  first-token  bytes   typechecks  result')}`);
+      for (const name of names) {
+        process.env.PHOENIX_WEBUI_STRATEGY = name;
+        let metrics: WebUIMetrics | undefined;
+        let body: string | undefined; let failReason: string | undefined;
+        const journal = new RunJournal(phoenixDir);
+        journal.startRun({ command: 'webui-compare', provider: `${llm.name}/${llm.model}`, strategy: name });
+        try {
+          const res = await generateIU(iu, {
+            llm, canonNodes, allIUs: ius, target: arch, interfaces, journal,
+            budgets: policy.budgets, maxRetries: policy.maxRetries, backoffMs: policy.backoffMs,
+            modelsByRole: resolveModelsByRole(phoenixDir, llm.name),
+            skipAuxGeneration: true,                 // compare the body only, not tests/scenarios
+            onWebUIMetrics: (m) => { metrics = m; },
+          });
+          if (res.failed) failReason = res.failed.reason;
+          else body = res.files.get(iu.output_files[0]);
+        } catch (e) { failReason = e instanceof Error ? e.message : String(e); }
+        journal.endRun(failReason ? 'failed' : 'ok');
+
+        let typechecks: string;
+        if (body && probe.available) {
+          typechecks = typecheckFile(projectRoot, iu.output_files[0], body, probe).status === 'clean' ? green('✓') : red('✗');
+        } else typechecks = dim('—');
+
+        const m = metrics;
+        const general = WEBUI_STRATEGIES[name].general ? 'yes' : red('NO');
+        const ft = m?.reachedFirstToken ? green('✓') : red('✗ stall');
+        const kb = body ? `${Math.round(Buffer.byteLength(body, 'utf8') / 1024)} KB` : dim('—');
+        const result = failReason ? red(failReason) : green('ok');
+        console.log(`  ${name.padEnd(15)} ${general.padEnd(8)} ${String(m?.calls ?? 0).padEnd(6)} ${ft.padEnd(11)} ${kb.padEnd(7)} ${typechecks.padEnd(11)} ${result}`);
+      }
+      // Restore the original web-ui file (typecheck overwrote it with the last candidate).
+      if (original !== null) writeFileSync(join(projectRoot, iu.output_files[0]), original, 'utf8');
+      console.log();
+    }
+  } finally {
+    if (prevStrategy === undefined) delete process.env.PHOENIX_WEBUI_STRATEGY; else process.env.PHOENIX_WEBUI_STRATEGY = prevStrategy;
+    if (prevTokens === undefined) delete process.env.PHOENIX_WEBUI_SLICE_TOKENS; else process.env.PHOENIX_WEBUI_SLICE_TOKENS = prevTokens;
+  }
+  console.log(dim('  (generation comparison only — run `phoenix run --runtime-checks` on the winner to verify boot + ui_behavior)\n'));
+}
+
 /** List the web-ui generation strategies (#27), tagged general vs spec-specific, with the active one. */
 function cmdWebUIStrategies(): void {
   const active = process.env.PHOENIX_WEBUI_STRATEGY ?? 'inline-slice';
@@ -1919,6 +2003,9 @@ async function main(): Promise<void> {
       break;
     case 'webui-strategies':
       cmdWebUIStrategies();
+      break;
+    case 'webui-compare':
+      await cmdWebUICompare(commandArgs);
       break;
     case 'regen':
     case 'regenerate':

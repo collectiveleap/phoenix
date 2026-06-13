@@ -110,6 +110,26 @@ describe('#27 harness: each strategy composes a body behind the seam', () => {
   }
 });
 
+describe('#27 webui-compare hooks: onWebUIMetrics + skipAuxGeneration', () => {
+  it('captures uniform metrics and skips aux test/scenario generation', async () => {
+    process.env.PHOENIX_WEBUI_SLICE_TOKENS = '0';
+    process.env.PHOENIX_WEBUI_STRATEGY = 'plan-split';
+    const { target, canon, ius, iu, interfaces } = webIU();
+    const provider = new StrategyProvider();
+    let captured: import('../../src/regen.js').WebUIMetrics | undefined;
+    const result = await generateIU(iu, {
+      llm: provider, canonNodes: canon, allIUs: ius, interfaces, target,
+      skipAuxGeneration: true, onWebUIMetrics: (m) => { captured = m; },
+    });
+    expect(captured?.strategy).toBe('plan-split');
+    expect(captured?.success).toBe(true);
+    expect(captured?.reachedFirstToken).toBe(true);
+    expect(captured?.calls).toBeGreaterThanOrEqual(2);     // shell + ≥1 slice
+    expect(provider.ui).toBe(0);                            // aux (ui-scenario) generation skipped
+    expect([...result.files.keys()].some(p => /\.(ui\.spec|behavior\.test)\.ts$/.test(p))).toBe(false);
+  });
+});
+
 describe('#27 harness: #9 fail-fast holds for a strategy that cannot produce', () => {
   it('a stalling strategy → generation_failed, no stub', async () => {
     process.env.PHOENIX_WEBUI_SLICE_TOKENS = '0';
