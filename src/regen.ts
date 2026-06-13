@@ -16,7 +16,7 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt, buildShellPrompt, buildSlicePrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt, buildShellPrompt, buildSlicePrompt, buildBoundedShellPrompt, buildCompactSlicePrompt, buildBrambleShellPrompt } from './llm/prompt.js';
 import { CanonicalType } from './models/canonical.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import { DEFAULT_ROLE_SURFACES } from './models/architecture.js';
@@ -566,6 +566,137 @@ export function composeWebUI(shell: string, blocks: string[], journal?: RunJourn
   return shell + '\n' + joined;
 }
 
+// ─── Web-UI generation strategy harness (#27) ───────────────────────────────
+// A large web-ui module can be generated several ways; rather than replace one with
+// another, they are selectable STRATEGIES behind a seam with uniform metrics, so they
+// can be A/B compared on the same spec. The pipeline around the seam is constant — same
+// spec → plan → assembly → serving → acceptance; only how the web-ui BODY is produced varies.
+
+/** Uniform per-strategy metrics, journalled as `webui_strategy` for apples-to-apples A/B. */
+export interface WebUIMetrics {
+  strategy: string;
+  general: boolean;          // false ⇒ spec-specific (tracked, never mistaken for the general fix)
+  calls: number;             // strategy-level LLM calls (shell, slices, …)
+  reachedFirstToken: boolean;
+  totalBytes: number;        // bytes of the produced body
+  maxPromptBytes: number;    // largest single prompt sent (the durability signal)
+  success: boolean;
+  failureReason?: string;
+}
+
+/** What a strategy is handed: the frozen inputs + a bounded, supervised, metric-tracked `gen`. */
+export interface WebUIStrategyContext {
+  iu: ImplementationUnit;
+  canonNodes: CanonicalNode[];
+  siblingEntries: InterfaceEntry[];
+  target?: ResolvedTarget | null;
+  gen: (prompt: string) => Promise<string>;
+  log?: (message: string) => void;
+  journal?: RunJournal;
+}
+
+/** A pluggable way to produce the web-ui module body (pre-assembleFromTemplate). Throw ⇒ #9 fail. */
+export interface WebUIStrategy {
+  name: string;
+  general: boolean;
+  generate(ctx: WebUIStrategyContext): Promise<string>;
+}
+
+/** `single` (control): the whole SPA in one call — the baseline that stalls on large specs. */
+const singleStrategy: WebUIStrategy = {
+  name: 'single', general: true,
+  generate: (c) => c.gen(buildPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target)),
+};
+
+/** `inline-slice` (current default): lean shell (lists behaviours) + slices embedding the shell. */
+const inlineSliceStrategy: WebUIStrategy = {
+  name: 'inline-slice', general: true,
+  async generate(c) {
+    const groups = chunkWebUINodes(c.iu, c.canonNodes);
+    c.log?.(`  ↳ ${c.iu.name}: web-ui via inline-slice → shell + ${groups.length} slice(s)`);
+    const shell = await c.gen(buildShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
+    const blocks: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      blocks.push(cleanCodeResponse(await c.gen(buildSlicePrompt(c.iu, groups[i], shell, c.target, i))));
+    }
+    return composeWebUI(shell, blocks, c.journal, c.iu.name);
+  },
+};
+
+/** Pull the compact `__CONTRACT__` block the bounded shell emits; fall back to a bounded head. */
+function extractShellContract(shell: string): string {
+  const m = shell.match(/\/\*\s*__CONTRACT__([\s\S]*?)__ENDCONTRACT__\s*\*\//);
+  if (m) return m[1].trim();
+  const scriptIdx = shell.indexOf('<script>');
+  return (scriptIdx >= 0 ? shell.slice(scriptIdx + 8) : shell).slice(0, 1200);
+}
+
+/** `plan-split` (general): bounded shell (no behaviour list) + bounded slices (contract, not full
+ * shell). Neither prompt grows with the spec — a bigger spec adds slices, never a bigger prompt. */
+const planSplitStrategy: WebUIStrategy = {
+  name: 'plan-split', general: true,
+  async generate(c) {
+    const groups = chunkWebUINodes(c.iu, c.canonNodes);
+    c.log?.(`  ↳ ${c.iu.name}: web-ui via plan-split → shell + ${groups.length} bounded slice(s)`);
+    const shell = await c.gen(buildBoundedShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
+    const contract = extractShellContract(shell);
+    const blocks: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      blocks.push(cleanCodeResponse(await c.gen(buildCompactSlicePrompt(c.iu, groups[i], contract, c.target, i))));
+    }
+    return composeWebUI(shell, blocks, c.journal, c.iu.name);
+  },
+};
+
+/** Spec-specific clustering of an outliner's behaviour clauses into known capability groups (#27). */
+const BRAMBLE_CLUSTERS: { key: string; re: RegExp }[] = [
+  { key: 'editing', re: /\b(split|join|indent|dedent|enter|tab|backspace|delete|insert|sibling|edit|type|text)\b/i },
+  { key: 'references', re: /\b(@|mention|reference|backlink|link|\[\[)\b/i },
+  { key: 'navigation', re: /\b(zoom|header|breadcrumb|collapse|expand|fold|focus|caret|arrow|click|select|move)\b/i },
+];
+function brambleClusters(iu: ImplementationUnit, canonNodes: CanonicalNode[]): CanonicalNode[][] {
+  const own = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id)
+    && (n.type === CanonicalType.REQUIREMENT || n.type === CanonicalType.CONSTRAINT || n.type === CanonicalType.INVARIANT));
+  const buckets = new Map<string, CanonicalNode[]>();
+  for (const n of own) {
+    const hit = BRAMBLE_CLUSTERS.find(c => c.re.test(n.statement))?.key ?? 'misc';
+    (buckets.get(hit) ?? buckets.set(hit, []).get(hit)!).push(n);
+  }
+  return [...buckets.values()].filter(g => g.length > 0);
+}
+
+/** `bramble` (general:false): a spec-tuned outliner shell + slices grouped by known capability
+ * clusters. Concrete + small per call → reliably reaches first-token. Tracked as spec-specific. */
+const brambleStrategy: WebUIStrategy = {
+  name: 'bramble', general: false,
+  async generate(c) {
+    const clusters = brambleClusters(c.iu, c.canonNodes);
+    const groups = clusters.length ? clusters : chunkWebUINodes(c.iu, c.canonNodes);
+    c.log?.(`  ↳ ${c.iu.name}: web-ui via bramble (spec-tuned) → shell + ${groups.length} capability slice(s)`);
+    const shell = await c.gen(buildBrambleShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
+    const contract = extractShellContract(shell);
+    const blocks: string[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      blocks.push(cleanCodeResponse(await c.gen(buildCompactSlicePrompt(c.iu, groups[i], contract, c.target, i))));
+    }
+    return composeWebUI(shell, blocks, c.journal, c.iu.name);
+  },
+};
+
+export const WEBUI_STRATEGIES: Record<string, WebUIStrategy> = {
+  single: singleStrategy,
+  'inline-slice': inlineSliceStrategy,
+  'plan-split': planSplitStrategy,
+  bramble: brambleStrategy,
+};
+const DEFAULT_WEBUI_STRATEGY = 'inline-slice';
+
+/** Resolve the active strategy from `PHOENIX_WEBUI_STRATEGY` (default = current behaviour). */
+export function selectWebUIStrategy(name?: string): WebUIStrategy {
+  const key = name ?? process.env.PHOENIX_WEBUI_STRATEGY ?? DEFAULT_WEBUI_STRATEGY;
+  return WEBUI_STRATEGIES[key] ?? WEBUI_STRATEGIES[DEFAULT_WEBUI_STRATEGY];
+}
+
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
@@ -684,25 +815,38 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   const sliceWebUI = !!template && role === 'web-ui'
     && process.env.PHOENIX_WEBUI_SLICE !== '0' && estWebUIOutput > sliceThreshold;
 
-  const generateWebUIBody = async (opts: GenerateOptions): Promise<string> => {
-    const groups = chunkWebUINodes(iu, canonNodes);
-    ctx.log?.(`  ↳ ${iu.name}: oversized web-ui → generating as a shell + ${groups.length} slice(s)`);
-    journal?.event('webui_shell', { iu: iu.name, slices: groups.length });
-    const shell = await generateRaw(buildShellPrompt(iu, canonNodes, siblingEntries, target), opts);
-    const blocks: string[] = [];
-    for (let i = 0; i < groups.length; i++) {
-      journal?.event('webui_slice', { iu: iu.name, slice: i + 1, of: groups.length, clauses: groups[i].length });
-      const raw = await generateRaw(buildSlicePrompt(iu, groups[i], shell, target, i), opts);
-      blocks.push(cleanCodeResponse(raw));
+  // Run the selected web-ui strategy behind the harness seam, capturing uniform metrics
+  // (#27). `gen` is the bounded, supervised, continuation-aware call every strategy shares,
+  // so the only variable across an A/B is the strategy's internals.
+  const runWebUIStrategy = async (opts: GenerateOptions): Promise<string> => {
+    const strategy = selectWebUIStrategy();
+    const m: WebUIMetrics = {
+      strategy: strategy.name, general: strategy.general,
+      calls: 0, reachedFirstToken: false, totalBytes: 0, maxPromptBytes: 0, success: false,
+    };
+    const gen = async (p: string): Promise<string> => {
+      m.calls++;
+      m.maxPromptBytes = Math.max(m.maxPromptBytes, Buffer.byteLength(p, 'utf8'));
+      const text = await generateRaw(p, opts);
+      m.reachedFirstToken = true; // returning ⇒ the call produced content (a stall throws)
+      return text;
+    };
+    try {
+      const body = await strategy.generate({ iu, canonNodes, siblingEntries, target, gen, log: ctx.log, journal });
+      m.totalBytes = Buffer.byteLength(body, 'utf8');
+      m.success = true;
+      return body;
+    } catch (err) {
+      m.failureReason = err instanceof Error ? err.message : String(err);
+      throw err; // #9: a strategy that can't produce hard-fails the module (no stub)
+    } finally {
+      journal?.event('webui_strategy', { iu: iu.name, ...m });
     }
-    const composed = composeWebUI(shell, blocks, journal, iu.name);
-    journal?.event('webui_composed', { iu: iu.name, slices: groups.length, totalBytes: Buffer.byteLength(composed, 'utf8') });
-    return composed;
   };
 
   const generateOnce = async (): Promise<string> => {
     const opts: GenerateOptions = { system: systemPrompt, temperature: template ? 0.1 : 0.2, maxTokens, model };
-    const raw = sliceWebUI ? await generateWebUIBody(opts) : await generateRaw(prompt, opts);
+    const raw = sliceWebUI ? await runWebUIStrategy(opts) : await generateRaw(prompt, opts);
     return template ? assembleFromTemplate(template, raw, iu) : cleanCodeResponse(raw);
   };
 

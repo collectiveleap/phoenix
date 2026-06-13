@@ -37,7 +37,7 @@ import { runSupervised, renderRunStatus } from './harness/run.js';
 import { loadPolicy, describePolicy } from './harness/policy.js';
 import { acquireRunLock, AlreadyRunningError } from './harness/lock.js';
 import { RunJournal } from './observe/journal.js';
-import { generateIU, generateAll } from './regen.js';
+import { generateIU, generateAll, WEBUI_STRATEGIES } from './regen.js';
 import type { RegenContext } from './regen.js';
 import { detectDrift } from './drift.js';
 import { extractDependencies } from './dep-extractor.js';
@@ -1448,6 +1448,19 @@ function cmdDrift(): void {
   }
 }
 
+/** List the web-ui generation strategies (#27), tagged general vs spec-specific, with the active one. */
+function cmdWebUIStrategies(): void {
+  const active = process.env.PHOENIX_WEBUI_STRATEGY ?? 'inline-slice';
+  console.log('\nWeb-UI generation strategies (#27 experiment harness)\n');
+  for (const [name, s] of Object.entries(WEBUI_STRATEGIES)) {
+    const tag = s.general ? green('general') : yellow('spec-specific');
+    const mark = name === active ? blue(' ← active') : '';
+    console.log(`  ${name.padEnd(14)} ${tag}${mark}`);
+  }
+  console.log('\n  select with PHOENIX_WEBUI_STRATEGY=<name> (default: inline-slice)');
+  console.log('  per-run metrics are journalled as `webui_strategy` — run the same spec under each to A/B.\n');
+}
+
 async function cmdCanonicalize(): Promise<void> {
   const { projectRoot, phoenixDir } = requirePhoenixRoot();
   const specStore = new SpecStore(phoenixDir);
@@ -1903,6 +1916,9 @@ async function main(): Promise<void> {
       break;
     case 'runs':
       cmdRuns(commandArgs);
+      break;
+    case 'webui-strategies':
+      cmdWebUIStrategies();
       break;
     case 'regen':
     case 'regenerate':

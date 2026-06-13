@@ -331,6 +331,171 @@ export function buildSlicePrompt(
   ].join('\n');
 }
 
+/**
+ * Bounded shell prompt for the `plan-split` strategy (#27). Like `buildShellPrompt` but it does
+ * NOT enumerate behaviours — only their COUNT — and asks the shell to emit a compact `__CONTRACT__`
+ * block (state shape + render() + element ids) that handler slices reference instead of the whole
+ * shell. So neither this prompt nor the slice prompts grow with the spec — the durability fix.
+ */
+export function buildBoundedShellPrompt(
+  iu: ImplementationUnit,
+  canonNodes: CanonicalNode[],
+  siblingModules: InterfaceEntry[] | undefined,
+  target: ResolvedTarget | null | undefined,
+): string {
+  const iuNodes = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id));
+  const model = iuNodes.filter(n => n.type === 'DEFINITION' || n.type === 'CONTEXT');
+  const behaviourCount = iuNodes.filter(n =>
+    n.type === 'REQUIREMENT' || n.type === 'CONSTRAINT' || n.type === 'INVARIANT').length;
+  const lines: string[] = [];
+  lines.push(`Generate the page SHELL for the web module "${iu.name}". This is a large module built in slices;`);
+  lines.push('produce ONLY the skeleton now — NOT the interaction logic.');
+  lines.push('');
+  if (target) {
+    lines.push('## Start the module with exactly these imports');
+    lines.push('```');
+    lines.push(`import { Hono } from 'hono';`);
+    lines.push(`import { db, registerMigration } from '../../db.js';`);
+    lines.push(`import { z } from 'zod';`);
+    lines.push('```');
+    lines.push('');
+  }
+  if (model.length > 0) {
+    lines.push('## Data model & vocabulary the page works with');
+    for (const n of model) lines.push(`- ${n.statement}`);
+    lines.push('');
+  }
+  lines.push('## Scope');
+  lines.push(`The page supports ${behaviourCount} interaction behaviours; each is added SEPARATELY as a slice —`);
+  lines.push('do NOT implement them here.');
+  lines.push('');
+  const providers = (siblingModules ?? []).filter(e => e.role !== 'web-ui');
+  const dialect = target?.runtime.interfaceDialect;
+  if (providers.length > 0 && dialect) {
+    lines.push('## Backend to call (use these exact addresses; do NOT invent paths)');
+    for (const entry of providers) if (entry.contract) lines.push(dialect.describeForPrompt(entry.contract));
+    lines.push('');
+  }
+  lines.push('## Your task — the SHELL ONLY');
+  lines.push('Return `c.html()` with a complete HTML document, all CSS/JS inline: the full page structure, the');
+  lines.push('shared client-side STATE model, a clear `render()` that draws state into the DOM, a `load()` that');
+  lines.push('fetches from the backend and renders, and the bare event-binding scaffold.');
+  lines.push('Where the interaction handlers go, emit EXACTLY this line and nothing else for them:');
+  lines.push('    /* __HANDLERS__ */');
+  lines.push('Immediately inside the opening `<script>`, emit a CONTRACT block the slices rely on — the shared');
+  lines.push('state shape, what `render()` does, and the key element ids/selectors handlers target — exactly so:');
+  lines.push('    /* __CONTRACT__');
+  lines.push('    state: <shape of the shared state object>');
+  lines.push('    render(): <one line: what calling render() does>');
+  lines.push('    elements: <ids/selectors handlers will target>');
+  lines.push('    __ENDCONTRACT__ */');
+  lines.push('Keep the shell small; define state and `render()` concretely so slices can plug in.');
+  lines.push('');
+  lines.push('## Required metadata export (include verbatim at the end)');
+  lines.push('```');
+  lines.push(`export const _phoenix = { iu_id: '${iu.iu_id}', name: '${iu.name}', risk_tier: '${iu.risk_tier}', canon_ids: [${iu.source_canon_ids.length} as const] } as const;`);
+  lines.push('```');
+  lines.push('');
+  lines.push('Output the shell module now.');
+  return lines.join('\n');
+}
+
+/**
+ * Compact slice prompt for `plan-split` (#27): the slice's own clauses + the shell's CONTRACT block
+ * (not the whole shell body), so the prompt size is independent of the shell/spec size.
+ */
+export function buildCompactSlicePrompt(
+  iu: ImplementationUnit,
+  sliceNodes: CanonicalNode[],
+  contract: string,
+  _target: ResolvedTarget | null | undefined,
+  index: number,
+): string {
+  return [
+    `You are implementing slice ${index + 1} of the interaction logic for the web page "${iu.name}".`,
+    'The page shell already exists. Implement ONLY the behaviours below as a self-contained block of client-side',
+    'JavaScript (event listeners + helper functions) that plugs in where the shell has `/* __HANDLERS__ */`,',
+    'using the shared state and `render()` described in the CONTRACT.',
+    '',
+    '### Rules',
+    '- Output ONLY the raw JavaScript to insert at the marker — no preamble, no explanation, no code fences, no',
+    '  `<script>` tags, no HTML. Do NOT redeclare the shared state or `render()`.',
+    '- This block sits INSIDE an inline `<script>` within a server-rendered HTML template literal — no unescaped',
+    '  backticks or `${...}`.',
+    '',
+    '### Shell contract (the shared state / render() / elements you must use)',
+    contract,
+    '',
+    '### Behaviours to implement in this slice',
+    ...sliceNodes.map(n => `- [${n.type}] ${n.statement}`),
+  ].join('\n');
+}
+
+/**
+ * Spec-tuned shell prompt for the `bramble` strategy (#27, general:false). Unlike the generic
+ * bounded shell, it concretely names the KNOWN outliner regions (outline tree, header/zoom,
+ * @-mention picker, backlinks) so the model produces a small, concrete skeleton that reliably
+ * reaches first-token. Intentionally Bramble-specific — tracked, not the general solution.
+ */
+export function buildBrambleShellPrompt(
+  iu: ImplementationUnit,
+  canonNodes: CanonicalNode[],
+  siblingModules: InterfaceEntry[] | undefined,
+  target: ResolvedTarget | null | undefined,
+): string {
+  const lines: string[] = [];
+  lines.push(`Generate the page SHELL for a keyboard-driven OUTLINER web app "${iu.name}". Produce ONLY the`);
+  lines.push('skeleton now — NOT the interaction handlers.');
+  lines.push('');
+  if (target) {
+    lines.push('## Start the module with exactly these imports');
+    lines.push('```');
+    lines.push(`import { Hono } from 'hono';`);
+    lines.push(`import { db, registerMigration } from '../../db.js';`);
+    lines.push(`import { z } from 'zod';`);
+    lines.push('```');
+    lines.push('');
+  }
+  lines.push('## The page, concretely');
+  lines.push('- a scrollable OUTLINE: a vertical list of nested, indentable lines, each an editable text node');
+  lines.push('  (`contenteditable`), with collapse/expand carets;');
+  lines.push('- a HEADER bar: the current zoom path (breadcrumb) + the zoomed node title;');
+  lines.push('- an inline @-MENTION PICKER: a dropdown shown while typing `@`, listing existing nodes by label;');
+  lines.push('- a BACKLINKS panel: nodes that reference the focused node;');
+  lines.push('- all CSS inline.');
+  lines.push('');
+  lines.push('## State & render contract');
+  lines.push('- State: the operation log fetched from the backend, folded into a node tree');
+  lines.push('  (id → { text, children, collapsed, refs }).');
+  lines.push('- `render()`: re-folds the log and redraws the outline, header, and backlinks from state.');
+  lines.push('- `load()`: fetches the operation log from the backend and calls `render()`.');
+  lines.push('');
+  const providers = (siblingModules ?? []).filter(e => e.role !== 'web-ui');
+  const dialect = target?.runtime.interfaceDialect;
+  if (providers.length > 0 && dialect) {
+    lines.push('## Backend to call (use these exact addresses; do NOT invent paths)');
+    for (const entry of providers) if (entry.contract) lines.push(dialect.describeForPrompt(entry.contract));
+    lines.push('');
+  }
+  lines.push('## Your task — the SHELL ONLY');
+  lines.push('Return `c.html()` with the complete HTML document (structure + inline CSS), the state model,');
+  lines.push('`render()`, `load()`, and the bare event-binding scaffold. Emit EXACTLY `/* __HANDLERS__ */` where');
+  lines.push('the handlers go (added separately), and right inside `<script>` a CONTRACT block:');
+  lines.push('    /* __CONTRACT__');
+  lines.push('    state: <shape of the shared state>');
+  lines.push('    render(): <one line>');
+  lines.push('    elements: <ids/selectors handlers target: outline, header, picker, backlinks, …>');
+  lines.push('    __ENDCONTRACT__ */');
+  lines.push('');
+  lines.push('## Required metadata export (verbatim at the end)');
+  lines.push('```');
+  lines.push(`export const _phoenix = { iu_id: '${iu.iu_id}', name: '${iu.name}', risk_tier: '${iu.risk_tier}', canon_ids: [${iu.source_canon_ids.length} as const] } as const;`);
+  lines.push('```');
+  lines.push('');
+  lines.push('Output the shell module now.');
+  return lines.join('\n');
+}
+
 export function getTestSystemPrompt(target?: ResolvedTarget | null): string {
   const lang = target?.runtime.language ?? 'TypeScript';
   return `You are a senior ${lang} engineer writing behavioral tests with vitest.
