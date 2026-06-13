@@ -238,21 +238,63 @@ export function buildShellPrompt(
   siblingModules: InterfaceEntry[] | undefined,
   target: ResolvedTarget | null | undefined,
 ): string {
-  return [
-    buildPrompt(iu, canonNodes, siblingModules, target),
-    '',
-    '## OVERRIDE: generate the page SHELL only (this large module is being built in slices)',
-    'Output the complete module, but generate ONLY the page shell — NOT the interaction logic:',
-    '- the full HTML document (doctype, <head> with inline <style>, <body> with the structural elements);',
-    '- the shared client-side STATE model, and a clear `render()` that draws state into the DOM;',
-    '- a `load()` that fetches initial data from the store and calls `render()`;',
-    '- the bare event-binding scaffold.',
-    'Where the interaction handlers (keyboard/mouse/editing behaviours) would be implemented, emit EXACTLY this',
-    'one line and nothing else in their place:',
-    '    /* __HANDLERS__ */',
-    'Do NOT implement the handlers — they are generated separately and will reuse the shared state and',
-    '`render()` you define here. Define that shared state and `render()` clearly so the handler slices can plug in.',
-  ].join('\n');
+  // The shell prompt must be SMALL so the call reaches first-token (the whole-SPA prompt is
+  // what stalls). So it deliberately does NOT inherit buildPrompt's code examples or full
+  // formatting — only the data model, a terse capability list (for structure), the backend
+  // contract, and skeleton instructions. The detailed behaviour clauses go to the slices.
+  const iuNodes = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id));
+  const model = iuNodes.filter(n => n.type === 'DEFINITION' || n.type === 'CONTEXT');
+  const behaviors = iuNodes.filter(n => n.type === 'REQUIREMENT' || n.type === 'CONSTRAINT' || n.type === 'INVARIANT');
+  const lines: string[] = [];
+
+  lines.push(`Generate the page SHELL for the web module "${iu.name}". This is a large module built in slices,`);
+  lines.push('so produce ONLY the skeleton now — NOT the interaction logic.');
+  lines.push('');
+  if (target) {
+    lines.push('## Start the module with exactly these imports');
+    lines.push('```');
+    lines.push(`import { Hono } from 'hono';`);
+    lines.push(`import { db, registerMigration } from '../../db.js';`);
+    lines.push(`import { z } from 'zod';`);
+    lines.push('```');
+    lines.push('');
+  }
+  if (model.length > 0) {
+    lines.push('## Data model & vocabulary the page works with');
+    for (const n of model) lines.push(`- ${n.statement}`);
+    lines.push('');
+  }
+  if (behaviors.length > 0) {
+    lines.push('## Capabilities the page supports (implemented SEPARATELY as slices — do NOT implement them here)');
+    for (const n of behaviors) lines.push(`- ${n.statement}`);
+    lines.push('');
+  }
+  const providers = (siblingModules ?? []).filter(e => e.role !== 'web-ui');
+  const dialect = target?.runtime.interfaceDialect;
+  if (providers.length > 0 && dialect) {
+    lines.push('## Backend to call (use these exact addresses; do NOT invent paths)');
+    for (const entry of providers) if (entry.contract) lines.push(dialect.describeForPrompt(entry.contract));
+    lines.push('');
+  }
+  lines.push('## Your task — the SHELL ONLY');
+  lines.push('Return `c.html()` with a complete HTML document, all CSS and JS inline, containing:');
+  lines.push('- the full page structure (doctype, <head> with inline <style>, <body> with the structural elements);');
+  lines.push('- the shared client-side STATE model, a clear `render()` that draws state into the DOM, and a');
+  lines.push('  `load()` that fetches initial data from the backend and calls `render()`;');
+  lines.push('- the bare event-binding scaffold.');
+  lines.push('Where the interaction handlers (the capabilities above) would be implemented, emit EXACTLY this one');
+  lines.push('line and nothing else in their place:');
+  lines.push('    /* __HANDLERS__ */');
+  lines.push('Do NOT implement the capabilities — they are generated separately and reuse the shared state and');
+  lines.push('`render()` you define. Keep the shell small; define state and `render()` clearly so handlers plug in.');
+  lines.push('');
+  lines.push('## Required metadata export (include verbatim at the end)');
+  lines.push('```');
+  lines.push(`export const _phoenix = { iu_id: '${iu.iu_id}', name: '${iu.name}', risk_tier: '${iu.risk_tier}', canon_ids: [${iu.source_canon_ids.length} as const] } as const;`);
+  lines.push('```');
+  lines.push('');
+  lines.push('Output the shell module now.');
+  return lines.join('\n');
 }
 
 /**

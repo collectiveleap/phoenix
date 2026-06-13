@@ -102,6 +102,8 @@ export interface RegenContext {
   modelsByRole?: Record<string, string>;
   /** Callback for progress reporting. */
   onProgress?: (iu: ImplementationUnit, status: 'start' | 'done' | 'error', message?: string) => void;
+  /** Run-level logger for notable decisions (e.g. a web-ui being split into shell + slices). */
+  log?: (message: string) => void;
 }
 
 /**
@@ -684,6 +686,7 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
 
   const generateWebUIBody = async (opts: GenerateOptions): Promise<string> => {
     const groups = chunkWebUINodes(iu, canonNodes);
+    ctx.log?.(`  ↳ ${iu.name}: oversized web-ui → generating as a shell + ${groups.length} slice(s)`);
     journal?.event('webui_shell', { iu: iu.name, slices: groups.length });
     const shell = await generateRaw(buildShellPrompt(iu, canonNodes, siblingEntries, target), opts);
     const blocks: string[] = [];

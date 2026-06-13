@@ -23,8 +23,8 @@ class SliceProvider implements LLMProvider {
   generate(p: string, o?: GenerateOptions) { return this.generateStream(p, o); }
   async generateStream(prompt: string, _o?: GenerateOptions, hooks?: StreamHooks): Promise<string> {
     let text: string;
-    if (/page SHELL only/.test(prompt)) { this.shellCalls++; text = SHELL; }
-    else if (/implementing slice/.test(prompt)) { this.sliceCalls++; text = `document.addEventListener('keydown', SLICE_${this.sliceCalls}_HANDLER);`; }
+    if (/implementing slice \d/.test(prompt)) { this.sliceCalls++; text = `document.addEventListener('keydown', SLICE_${this.sliceCalls}_HANDLER);`; }
+    else if (/Output the shell module now/.test(prompt)) { this.shellCalls++; text = SHELL; }
     else { this.plainCalls++; text = "router.get('/', (c) => c.html(`<html>plain</html>`));"; }
     hooks?.onFirstByte?.(); hooks?.onChunk?.(text.length, text); hooks?.onStopReason?.('end_turn'); hooks?.onStreamEnd?.();
     return text;

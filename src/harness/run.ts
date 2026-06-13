@@ -222,6 +222,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       maxRepairs: policy.maxRepairs,
       backoffMs: policy.backoffMs,
       modelsByRole: resolveModelsByRole(phoenixDir, llm?.name), // per-role model (G2)
+      log,
       onProgress: (iu, status, msg) => {
         if (status === 'done') log(`  ✔ ${iu.name}`);
         else if (status === 'error') log(`  ✖ ${iu.name}: ${msg ?? 'failed'}`);
