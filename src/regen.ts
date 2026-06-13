@@ -219,7 +219,8 @@ export async function generateIU(iu: ImplementationUnit, ctx?: RegenContext): Pr
         .filter((c): c is InterfaceContract => !!c);
       const raw = await generateUiScenariosWithLLM(iu, ctx, depContracts);
       if (raw) {
-        files.set(`${dir}/__tests__/${base}.ui.spec.ts`, raw);
+        // Type any factored-out helper so the spec passes strict typecheck (#29).
+        files.set(`${dir}/__tests__/${base}.ui.spec.ts`, typePlaywrightHelpers(raw));
         ctx.journal?.event('ui_scenarios', { iu: iu.name, module: base });
       }
     }
@@ -561,6 +562,26 @@ export function chunkWebUINodes(iu: ImplementationUnit, canonNodes: CanonicalNod
  * `</script>` (never drop a slice) and record it — a botched compose then fails the typecheck
  * gate / generate stage rather than silently shipping incomplete behaviour.
  */
+/**
+ * Type Playwright helper params so a generated `*.ui.spec.ts` passes a strict typecheck (#29):
+ * a factored-out `async function openApp(page)` is an implicit-any error under `noImplicitAny`.
+ * Annotate `(page)` → `(page: Page)` (definitions only, not calls or destructured `{ page }`) and
+ * ensure `Page` is imported. Deterministic backstop to the prompt guidance.
+ */
+export function typePlaywrightHelpers(code: string): string {
+  let out = code;
+  out = out.replace(/(\bfunction\s+\w+\s*\(\s*)page(\s*\))/g, '$1page: Page$2');       // function f(page)
+  out = out.replace(/(\(\s*)page(\s*\)\s*(?:=>|\{))/g, '$1page: Page$2');               // (page) => / (page) {
+  const usesPage = /\bpage:\s*Page\b/.test(out);
+  const importsPage = /import[^;]*\bPage\b[^;]*from\s*['"]@playwright\/test['"]/.test(out);
+  if (usesPage && !importsPage) {
+    out = /import\s*\{[^}]*\}\s*from\s*['"]@playwright\/test['"]/.test(out)
+      ? out.replace(/import\s*\{\s*([^}]*?)\s*\}\s*from\s*(['"]@playwright\/test['"])/, (_m, inner, src) => `import { ${inner}, type Page } from ${src}`)
+      : `import { type Page } from '@playwright/test';\n` + out;
+  }
+  return out;
+}
+
 export function composeWebUI(shell: string, blocks: string[], journal?: RunJournal, iuName = ''): string {
   const joined = blocks.filter(b => b.trim()).join('\n\n');
   if (shell.includes(HANDLERS_MARKER)) return shell.replace(HANDLERS_MARKER, joined);
@@ -810,16 +831,17 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
   };
 
   // Plan-split (#27): a large web-ui module asks for one monster SPA in a single call and
-  // stalls pre-first-token. Generate it as a small page SHELL + bounded handler SLICES, each
-  // a prompt that reaches first-token fast, composed at the shell's marker. Triggered only for
-  // a web-ui IU whose estimated output exceeds the budget; small web-ui modules are unchanged.
+  // stalls pre-first-token. Generate it as a small page SHELL + bounded handler SLICES via the
+  // selected strategy. Gate on the ACTUAL prompt size (#27 Finding 1) — the canon-id estimate
+  // under-predicted and gated out modules whose single-call prompt demonstrably stalls (a 21 KB
+  // prompt estimated at 28.5k < 32k → skipped → stalled). Prompt bytes track the real stall risk.
   const role = interfaces?.find(e => e.iu_id === iu.iu_id)?.role;
-  const estWebUIOutput = 6000 + iu.source_canon_ids.length * 1500; // mirrors estimateOutputTokens('web-ui', n)
-  const sliceThreshold = process.env.PHOENIX_WEBUI_SLICE_TOKENS !== undefined
-    ? Number(process.env.PHOENIX_WEBUI_SLICE_TOKENS) // explicit (incl. 0) — don't let `|| maxTokens` swallow it
-    : maxTokens;
+  const promptBytes = Buffer.byteLength(prompt, 'utf8');
+  const sliceBytesThreshold = process.env.PHOENIX_WEBUI_SLICE_BYTES !== undefined
+    ? Number(process.env.PHOENIX_WEBUI_SLICE_BYTES)
+    : (process.env.PHOENIX_WEBUI_SLICE_TOKENS === '0' ? 0 : 8000); // legacy `=0` still forces slicing
   const sliceWebUI = !!template && role === 'web-ui'
-    && process.env.PHOENIX_WEBUI_SLICE !== '0' && estWebUIOutput > sliceThreshold;
+    && process.env.PHOENIX_WEBUI_SLICE !== '0' && promptBytes > sliceBytesThreshold;
 
   // Run the selected web-ui strategy behind the harness seam, capturing uniform metrics
   // (#27). `gen` is the bounded, supervised, continuation-aware call every strategy shares,

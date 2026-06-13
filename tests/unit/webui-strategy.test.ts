@@ -62,7 +62,26 @@ function iuWithBehaviours(n: number): { iu: ImplementationUnit; canon: Canonical
   return { iu, canon };
 }
 
-afterEach(() => { delete process.env.PHOENIX_WEBUI_STRATEGY; delete process.env.PHOENIX_WEBUI_SLICE_TOKENS; });
+afterEach(() => {
+  delete process.env.PHOENIX_WEBUI_STRATEGY;
+  delete process.env.PHOENIX_WEBUI_SLICE_TOKENS;
+  delete process.env.PHOENIX_WEBUI_SLICE_BYTES;
+});
+
+describe('#27 Finding 1: slicing triggers on prompt bytes, not the canon-id estimate', () => {
+  it('slices when the prompt exceeds the byte threshold, single-call when under', async () => {
+    const { target, canon, ius, iu, interfaces } = webIU();
+    process.env.PHOENIX_WEBUI_SLICE_BYTES = '10';          // any real web-ui prompt exceeds this → slice
+    const p1 = new StrategyProvider();
+    await generateIU(iu, { llm: p1, canonNodes: canon, allIUs: ius, interfaces, target, skipAuxGeneration: true });
+    expect(p1.shell).toBe(1);
+    process.env.PHOENIX_WEBUI_SLICE_BYTES = '9999999';     // nothing reaches this → single whole-module call
+    const p2 = new StrategyProvider();
+    await generateIU(iu, { llm: p2, canonNodes: canon, allIUs: ius, interfaces, target, skipAuxGeneration: true });
+    expect(p2.shell).toBe(0);
+    expect(p2.single).toBe(1);
+  });
+});
 
 describe('#27 harness: selection + registry', () => {
   it('defaults to plan-split; selects by name; unknown falls back; tracks general/specific', () => {

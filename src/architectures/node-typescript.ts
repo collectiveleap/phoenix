@@ -287,10 +287,18 @@ never its internals. Derive every assertion from the requirements; the rendered 
   action on a line WITH text vs an EMPTY line), both directions of a gesture (left vs right, open vs close), and
   any "live / on every keystroke" update each get a scenario. A missing branch must surface as a failing
   scenario, not a silent gap.
+- Use the EXACT trigger key/gesture the requirements name — if the spec says typing \`@\` opens the picker,
+  type \`@\`. NEVER substitute a convention the spec didn't state (e.g. \`[[\` wiki-links, \`((\`): the page
+  implements the spec's gesture, so a different key opens nothing and the scenario fails falsely.
+- TYPECHECK under strict mode: if you factor out a shared helper, fully type its params —
+  \`import { test, expect, type Page } from '@playwright/test'\` and \`async function openApp(page: Page) { … }\`.
+  An untyped \`(page)\` is an implicit-any error. (Inlining the helper into the typed \`test(async ({ page }) …)\`
+  callback also works.)
 
 Example shape:
 \`\`\`ts
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+async function openApp(page: Page) { await page.goto('/'); }
 test('a created item appears in the list', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('Title').fill('Buy milk');

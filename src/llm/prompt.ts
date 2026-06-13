@@ -422,6 +422,9 @@ export function buildCompactSlicePrompt(
     '  `<script>` tags, no HTML. Do NOT redeclare the shared state or `render()`.',
     '- This block sits INSIDE an inline `<script>` within a server-rendered HTML template literal — no unescaped',
     '  backticks or `${...}`.',
+    '- Implement the FULL behaviour, including the GESTURE that CREATES or TRIGGERS it — not only rendering or',
+    '  updating data that already exists. If a behaviour says "typing @ creates a reference", wire the @',
+    '  keystroke that creates it; do not implement only the rendering of an already-created reference.',
     '',
     '### Shell contract (the shared state / render() / elements you must use)',
     contract,
@@ -583,9 +586,9 @@ export function buildUiScenarioPrompt(
   const lines: string[] = [];
   lines.push(`Write a Playwright UI scenario file for the "${iu.name}" page, from its SPECIFICATION below — NOT its implementation (you are not shown the rendered markup on purpose).`);
   lines.push('');
-  lines.push('## Import Playwright');
+  lines.push('## Import Playwright (include the Page type for any factored-out helper)');
   lines.push('```');
-  lines.push(`import { test, expect } from '@playwright/test';`);
+  lines.push(`import { test, expect, type Page } from '@playwright/test';`);
   lines.push('```');
   lines.push('');
 
