@@ -648,6 +648,21 @@ const inlineSliceStrategy: WebUIStrategy = {
   },
 };
 
+/** The provider (backend) operation vocabulary a web-ui slice may call (#30): so a slice grounds
+ * its store calls in the spec's declared ops and never invents one (e.g. a CRUD `update` the
+ * append-only store doesn't implement → a non-deterministic cross-module-contract failure). */
+export function backendOpsForPrompt(siblingEntries: InterfaceEntry[], target?: ResolvedTarget | null): string {
+  const dialect = target?.runtime.interfaceDialect;
+  if (!dialect) return '';
+  const blocks = siblingEntries
+    .filter(e => e.role !== 'web-ui' && e.contract)
+    .map(e => dialect.describeForPrompt(e.contract!))
+    .filter(Boolean);
+  return blocks.length
+    ? `\n\n## Backend operations — call ONLY these; never invent an operation (e.g. no CRUD 'update'):\n${blocks.join('\n')}`
+    : '';
+}
+
 /** Pull the compact `__CONTRACT__` block the bounded shell emits; fall back to a bounded head. */
 function extractShellContract(shell: string): string {
   const m = shell.match(/\/\*\s*__CONTRACT__([\s\S]*?)__ENDCONTRACT__\s*\*\//);
@@ -664,7 +679,7 @@ const planSplitStrategy: WebUIStrategy = {
     const groups = chunkWebUINodes(c.iu, c.canonNodes);
     c.log?.(`  ↳ ${c.iu.name}: web-ui via plan-split → shell + ${groups.length} bounded slice(s)`);
     const shell = await c.gen(buildBoundedShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
-    const contract = extractShellContract(shell);
+    const contract = extractShellContract(shell) + backendOpsForPrompt(c.siblingEntries, c.target);
     const blocks: string[] = [];
     for (let i = 0; i < groups.length; i++) {
       blocks.push(cleanCodeResponse(await c.gen(buildCompactSlicePrompt(c.iu, groups[i], contract, c.target, i))));
@@ -699,7 +714,7 @@ const brambleStrategy: WebUIStrategy = {
     const groups = clusters.length ? clusters : chunkWebUINodes(c.iu, c.canonNodes);
     c.log?.(`  ↳ ${c.iu.name}: web-ui via bramble (spec-tuned) → shell + ${groups.length} capability slice(s)`);
     const shell = await c.gen(buildBrambleShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
-    const contract = extractShellContract(shell);
+    const contract = extractShellContract(shell) + backendOpsForPrompt(c.siblingEntries, c.target);
     const blocks: string[] = [];
     for (let i = 0; i < groups.length; i++) {
       blocks.push(cleanCodeResponse(await c.gen(buildCompactSlicePrompt(c.iu, groups[i], contract, c.target, i))));
@@ -852,12 +867,30 @@ async function generateWithLLM(iu: ImplementationUnit, ctx: RegenContext): Promi
       strategy: strategy.name, general: strategy.general,
       calls: 0, reachedFirstToken: false, totalBytes: 0, maxPromptBytes: 0, success: false,
     };
+    // Retry a single stalled shell/slice call LOCALLY (#30): a transient watchdog-stall on one
+    // slice must not shorten the assembled module or bubble up to re-roll the WHOLE strategy
+    // (which amplifies non-determinism). A deterministic over-budget/truncation won't improve on
+    // retry, so bubble those immediately. Exhausted local retries ⇒ throw (fail the module, #9).
+    const sliceRetries = Number(process.env.PHOENIX_WEBUI_SLICE_RETRIES) || 2;
     const gen = async (p: string): Promise<string> => {
-      m.calls++;
       m.maxPromptBytes = Math.max(m.maxPromptBytes, Buffer.byteLength(p, 'utf8'));
-      const text = await generateRaw(p, opts);
-      m.reachedFirstToken = true; // returning ⇒ the call produced content (a stall throws)
-      return text;
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= sliceRetries; attempt++) {
+        m.calls++;
+        try {
+          const text = await generateRaw(p, opts);
+          m.reachedFirstToken = true; // returning ⇒ the call produced content (a stall throws)
+          return text;
+        } catch (err) {
+          lastErr = err;
+          if (err instanceof TruncationError || err instanceof BoundsExceededError || err instanceof OutputBudgetExceededError) throw err;
+          journal?.event('webui_call_retry', {
+            iu: iu.name, attempt: attempt + 1, of: sliceRetries,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      throw lastErr;
     };
     try {
       const body = await strategy.generate({ iu, canonNodes, siblingEntries, target, gen, log: ctx.log, journal });
