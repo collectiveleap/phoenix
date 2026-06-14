@@ -365,6 +365,15 @@ export function buildBoundedShellPrompt(
     for (const n of model) lines.push(`- ${n.statement}`);
     lines.push('');
   }
+  // Cross-section model/op vocabulary (e.g. the store's operation types + request envelope): the page
+  // MUST use these exact names/shapes when it talks to the backend, not invent its own (#33).
+  const related = canonNodes.filter(n => !iu.source_canon_ids.includes(n.canon_id)
+    && (n.type === 'DEFINITION' || n.type === 'CONTEXT'));
+  if (related.length > 0) {
+    lines.push('## Shared model & operation vocabulary from other modules (use these EXACT names/shapes — do NOT invent)');
+    for (const n of related) lines.push(`- [${n.type}] ${n.statement}`);
+    lines.push('');
+  }
   lines.push('## Scope');
   lines.push(`The page supports ${behaviourCount} interaction behaviours; each is added SEPARATELY as a slice —`);
   lines.push('do NOT implement them here.');
@@ -386,12 +395,17 @@ export function buildBoundedShellPrompt(
   lines.push('`role="textbox"`) so they are locatable by assistive tech and tests even when empty.');
   lines.push('Where the interaction handlers go, emit EXACTLY this line and nothing else for them:');
   lines.push('    /* __HANDLERS__ */');
+  lines.push('When persisting to the backend, use its EXACT operation-type vocabulary and request envelope (from the');
+  lines.push('shared model/operation vocabulary above — e.g. `{ type, payload }` where `type` is a spec op type);');
+  lines.push('NEVER invent op names (`create`/`edit`) or a flat shape, or every append is rejected (400).');
   lines.push('Immediately inside the opening `<script>`, emit a CONTRACT block the slices rely on — the shared');
-  lines.push('state shape, what `render()` does, and the key element ids/selectors handlers target — exactly so:');
+  lines.push('state shape, what `render()` does, the key element ids/selectors handlers target, and the BACKEND');
+  lines.push('WIRE format slices must reuse when posting — exactly so:');
   lines.push('    /* __CONTRACT__');
   lines.push('    state: <shape of the shared state object>');
   lines.push('    render(): <one line: what calling render() does>');
   lines.push('    elements: <ids/selectors handlers will target>');
+  lines.push('    wire: <how to POST an op: the request envelope + the exact op-type vocabulary, e.g. {type,payload}>');
   lines.push('    __ENDCONTRACT__ */');
   lines.push('Keep the shell small; define state and `render()` concretely so slices can plug in.');
   lines.push('');
@@ -429,8 +443,11 @@ export function buildCompactSlicePrompt(
     '- Implement the FULL behaviour, including the GESTURE that CREATES or TRIGGERS it — not only rendering or',
     '  updating data that already exists. If a behaviour says "typing @ creates a reference", wire the @',
     '  keystroke that creates it; do not implement only the rendering of an already-created reference.',
+    '- When you POST to the backend, use the CONTRACT\'s `wire` format and op-type vocabulary EXACTLY — the',
+    '  request envelope and op `type` values it lists. NEVER invent op names (`create`/`edit`) or a flat shape;',
+    '  a mismatched body is rejected (400) and nothing persists.',
     '',
-    '### Shell contract (the shared state / render() / elements you must use)',
+    '### Shell contract (the shared state / render() / elements / backend wire format you must use)',
     contract,
     '',
     '### Behaviours to implement in this slice',
@@ -485,6 +502,9 @@ export function buildBrambleShellPrompt(
   if (providers.length > 0 && dialect) {
     lines.push('## Backend to call (use these exact addresses; do NOT invent paths)');
     for (const entry of providers) if (entry.contract) lines.push(dialect.describeForPrompt(entry.contract));
+    lines.push('Append operations using the store\'s EXACT op-type vocabulary and request envelope (a');
+    lines.push('`{ type, payload }` body whose `type` is one of the spec\'s operation types) — NEVER invent op names');
+    lines.push('(`create`/`edit`) or a flat shape, or every append is rejected (400).');
     lines.push('');
   }
   lines.push('## Your task — the SHELL ONLY');
@@ -495,6 +515,7 @@ export function buildBrambleShellPrompt(
   lines.push('    state: <shape of the shared state>');
   lines.push('    render(): <one line>');
   lines.push('    elements: <ids/selectors handlers target: outline, header, picker, backlinks, …>');
+  lines.push('    wire: <how to POST an op: the request envelope + exact op-type vocabulary, e.g. {type,payload}>');
   lines.push('    __ENDCONTRACT__ */');
   lines.push('');
   lines.push('## Required metadata export (verbatim at the end)');
