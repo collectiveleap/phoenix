@@ -104,6 +104,15 @@ const CAPABILITY_VERBS: Record<Capability, RegExp> = {
   remove: /\b(delete|remove|destroy|purge|drop)\b/,
 };
 const NEGATION = /\b(never|not|no|cannot|can't|must not|may not|won't|shall not)\b/;
+/**
+ * "update(s)"/"remove(s)" are also ordinary prose ("the screen updates", "updates every occurrence
+ * live"). A clause describing UI/state-change behaviour must NOT reify a mutating REST operation the
+ * store never offers (#32 — a phantom `update` failed the store's conformance non-deterministically).
+ * Applied only to the mutating capabilities; list/create are the safe append-shape defaults.
+ */
+const DESCRIPTIVE_CONTEXT =
+  /\b(screen|render|redraw|repaint|display|view|page|ui|label|occurrence|live|keystroke|delay|background|everywhere|appears?|shown|visible|highlight|focus|caret|scroll|animat)\b/;
+const MUTATING_CAPS: ReadonlySet<Capability> = new Set<Capability>(['update', 'remove']);
 
 /**
  * Derive the CRUD capabilities a module *declares*, from its behavior statements.
@@ -125,7 +134,10 @@ export function declaredCrudCapabilities(iu: ImplementationUnit, canonNodes: Can
   for (const cap of CAPABILITY_ORDER) {
     const verb = CAPABILITY_VERBS[cap];
     for (const clause of clauses) {
-      if (verb.test(clause) && !NEGATION.test(clause)) { found.add(cap); break; }
+      if (!verb.test(clause) || NEGATION.test(clause)) continue;
+      // A mutating verb used to DESCRIBE behaviour ("the screen updates") is not an operation (#32).
+      if (MUTATING_CAPS.has(cap) && DESCRIPTIVE_CONTEXT.test(clause)) continue;
+      found.add(cap); break;
     }
   }
   if (found.size === 0) return [...CAPABILITY_ORDER]; // nothing declared → full CRUD (no regression)

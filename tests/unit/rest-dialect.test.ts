@@ -122,6 +122,25 @@ describe('P1.1: operations come from the module\'s declared behaviors, not a CRU
     expect(ops).not.toContain('remove');
   });
 
+  it('does not reify the prose verb "update" from descriptive UI behaviour (#32)', () => {
+    // The store's op vocabulary is append/list; "updates" here is ordinary prose describing UI
+    // behaviour, not a store operation. It must not become a phantom `update` op the store fails on.
+    const { iu: store, canon } = behaviorIU(
+      'Outliner Store',
+      [
+        'the store must append an operation and return the stored operation',
+        'the store must list all operations in seq order',
+        'the screen updates with no delay and the store appends the operation in the background',
+        'the system updates every occurrence of a node on each keystroke, live everywhere',
+      ],
+      [],
+      'an append-only operation log',
+    );
+    const caps = declaredCrudCapabilities(store, canon);
+    expect(caps).toEqual(['list', 'create']);
+    expect(caps).not.toContain('update');
+  });
+
   it('keeps update/remove for an entity that declares them — even under an append-only invariant', () => {
     // Storage discipline (append-only) must NOT strip the API surface: an entity
     // that declares delete/update keeps them (implemented as append/tombstone).
