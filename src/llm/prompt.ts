@@ -380,6 +380,10 @@ export function buildBoundedShellPrompt(
   lines.push('Return `c.html()` with a complete HTML document, all CSS/JS inline: the full page structure, the');
   lines.push('shared client-side STATE model, a clear `render()` that draws state into the DOM, a `load()` that');
   lines.push('fetches from the backend and renders, and the bare event-binding scaffold.');
+  lines.push('`render()` MUST always leave at least one focusable EDITABLE line in the DOM — including when the');
+  lines.push('state is EMPTY (render the empty/pending line then), so the page is immediately typable with no');
+  lines.push('data. Give editable lines the textbox role (a real input/textarea, or contenteditable +');
+  lines.push('`role="textbox"`) so they are locatable by assistive tech and tests even when empty.');
   lines.push('Where the interaction handlers go, emit EXACTLY this line and nothing else for them:');
   lines.push('    /* __HANDLERS__ */');
   lines.push('Immediately inside the opening `<script>`, emit a CONTRACT block the slices rely on — the shared');
@@ -470,7 +474,10 @@ export function buildBrambleShellPrompt(
   lines.push('## State & render contract');
   lines.push('- State: the operation log fetched from the backend, folded into a node tree');
   lines.push('  (id → { text, children, collapsed, refs }).');
-  lines.push('- `render()`: re-folds the log and redraws the outline, header, and backlinks from state.');
+  lines.push('- `render()`: re-folds the log and redraws the outline, header, and backlinks from state. When the');
+  lines.push('  outline is EMPTY it MUST still render a single empty editable line (the pending/trailing line), so');
+  lines.push('  the page is immediately typable. Every editable line carries the textbox role (contenteditable +');
+  lines.push('  `role="textbox"`) so it is locatable even when empty.');
   lines.push('- `load()`: fetches the operation log from the backend and calls `render()`.');
   lines.push('');
   const providers = (siblingModules ?? []).filter(e => e.role !== 'web-ui');

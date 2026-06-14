@@ -151,6 +151,12 @@ router.delete('/:id', (c) => { ... });
 - Tolerate data you cannot render: if an item/operation can't be folded or rendered, SKIP it (flagged), don't
   throw — the data source may be append-only and replay every load, so one unrenderable item must not make the
   app permanently unusable. A reload must recover.
+- \`render()\` MUST handle the EMPTY (zero-item) state: when there is no data, still render the surface the
+  spec calls for — e.g. a single empty editable line — never a blank container. The page must be usable and
+  focusable with no data (typing into that line creates the first item).
+- Expose editable surfaces with the TEXTBOX role so assistive tech and tests can locate them: a real
+  \`<input>\`/\`<textarea>\`, or \`contenteditable\` WITH \`role="textbox"\`. EVERY editable line — including an
+  empty one — must be findable as a textbox (\`getByRole('textbox')\`), regardless of content.
 `;
 
 // ─── Code examples ──────────────────────────────────────────────────────────
