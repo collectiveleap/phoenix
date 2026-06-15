@@ -41,6 +41,20 @@ describe('#32 reopened: module-level negation excludes a stray non-descriptive "
     expect(caps).not.toContain('update');
   });
 
+  it('append-log framing yields {list,create} deterministically — even with a non-negated "update" prose clause', () => {
+    // The decisive #32 case: no negation invariant (so module-negation alone wouldn't help) and a
+    // non-negated "update" sentence. The append-log FRAMING ("appends an operation") fixes the contract.
+    const { iu, canon } = iuWith(
+      [
+        'the store validates and appends an operation, returning the stored operation',
+        'the store returns all operations in seq order',
+        'the system updates a node when a keystroke edits it',
+      ],
+      [],
+    );
+    expect(declaredCrudCapabilities(iu, canon)).toEqual(['list', 'create']);
+  });
+
   it('still keeps update/remove when the spec declares them and never negates them', () => {
     const { iu, canon } = iuWith(
       ['the user can create a node and list nodes, update a node by id, and delete a node'],

@@ -7,7 +7,7 @@
  * and correct-enough to rely on.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, resolve, relative, basename, dirname } from 'node:path';
 
@@ -33,7 +33,8 @@ import { BootstrapStateMachine } from './bootstrap.js';
 // Phase C
 import { planIUs, analyzePlan } from './iu-planner.js';
 import { loadIUs, saveIUs } from './iu-planner-io.js';
-import { runSupervised, renderRunStatus } from './harness/run.js';
+import { runSupervised, renderRunStatus, verdictSignature } from './harness/run.js';
+import { sha256 } from './semhash.js';
 import { loadPolicy, describePolicy } from './harness/policy.js';
 import { acquireRunLock, AlreadyRunningError } from './harness/lock.js';
 import { RunJournal } from './observe/journal.js';
@@ -1363,6 +1364,89 @@ async function cmdRun(args: string[]): Promise<void> {
   }
 }
 
+/** Content hash of the generated tree (#30): identical hash ⇒ byte-identical generation. */
+function hashGeneratedTree(projectRoot: string): string {
+  const root = join(projectRoot, 'src', 'generated');
+  if (!existsSync(root)) return 'none';
+  const files: string[] = [];
+  const walk = (dir: string): void => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p); else files.push(p);
+    }
+  };
+  walk(root);
+  files.sort();
+  return sha256(files.map(f => relative(root, f) + ' ' + readFileSync(f, 'utf8')).join(''));
+}
+
+/**
+ * `phoenix verify [--runs N]` (#30) — the determinism gate. Regenerate the SAME spec N times (clean
+ * each), and check the EVALUATED verdict is reproducible. Phoenix's generation steps are non-deterministic
+ * (claude-cli has no seed); what must be deterministic is the result AS MEASURED BY the evaluation. This
+ * makes that measurable and is how a fix is confirmed: completion is decided by a repeatably-stable verdict,
+ * not one lucky regen. Exits non-zero if the verdict is unstable (or stably RED — an honest failure).
+ */
+async function cmdVerify(args: string[]): Promise<void> {
+  const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  const runs = Math.max(2, Number(args.find(a => a.startsWith('--runs='))?.split('=')[1]) || 2);
+  const policy = loadPolicy(phoenixDir);
+
+  let arch: ResolvedTarget | null = null;
+  const configPath = join(phoenixDir, 'config.json');
+  if (existsSync(configPath)) {
+    try { const c = JSON.parse(readFileSync(configPath, 'utf8')); if (c.architecture) arch = resolveTarget(c.architecture); } catch { /* ignore */ }
+  }
+  const llm = resolveProvider(phoenixDir);
+  if (!llm) { console.log(red('✖ verify needs an LLM provider.')); process.exitCode = 1; return; }
+
+  console.log(bold(`🔁 Determinism verify — ${runs} clean regens of the same spec`));
+  console.log(dim('   measuring whether the EVALUATED verdict is reproducible (#30)'));
+  console.log();
+
+  const ingest = (): Clause[] => {
+    const specStore = new SpecStore(phoenixDir);
+    const specFiles = findSpecFiles(projectRoot);
+    for (const f of specFiles) specStore.ingestDocument(f, projectRoot);
+    const clauses: Clause[] = [];
+    for (const f of specFiles) clauses.push(...specStore.getClauses(relative(projectRoot, f)));
+    return clauses;
+  };
+
+  const runsOut: { sig: string; ok: boolean; hash: string; runId: string }[] = [];
+  for (let i = 0; i < runs; i++) {
+    rmSync(join(projectRoot, 'data'), { recursive: true, force: true });          // fresh store each regen
+    rmSync(join(projectRoot, 'src', 'generated'), { recursive: true, force: true }); // clean generation
+    console.log(dim(`  run ${i + 1}/${runs}…`));
+    const result = await runSupervised({
+      projectRoot, phoenixDir, clauses: ingest(), arch, llm, policy,
+      resume: false, forceScaffold: true, runtimeChecks: true, install: i === 0,
+      log: () => { /* quiet per-run */ },
+    });
+    const sig = verdictSignature(result);
+    runsOut.push({ sig, ok: result.ok, hash: hashGeneratedTree(projectRoot), runId: result.runId });
+    console.log(`    ${result.ok ? green('✔') : red('✖')} ${result.runId}  ${dim(sig)}`);
+  }
+
+  const sigs = new Set(runsOut.map(r => r.sig));
+  const hashes = new Set(runsOut.map(r => r.hash));
+  console.log();
+  if (sigs.size === 1) {
+    console.log(green(`✔ Deterministic verdict across ${runs} regens.`));
+    console.log(hashes.size === 1
+      ? green('  generated output identical across runs too.')
+      : dim(`  generated output varied (${hashes.size} distinct) but the verdict is stable — deterministic as measured by the evaluation.`));
+    if (!runsOut[0].ok) {
+      console.log(yellow('  …but the verdict is RED — an honest, repeatable failure (not complete).'));
+      process.exitCode = 1;
+    }
+  } else {
+    console.log(red(`✖ NON-deterministic verdict: ${sigs.size} distinct verdicts across ${runs} regens — not complete.`));
+    for (const s of sigs) console.log(`    ${dim(s)}`);
+    process.exitCode = 1;
+  }
+}
+
 /** Inspect persisted runs (O15: answer the three questions post-hoc). */
 function cmdRuns(args: string[]): void {
   const { phoenixDir } = requirePhoenixRoot();
@@ -1997,6 +2081,9 @@ async function main(): Promise<void> {
       break;
     case 'run':
       await cmdRun(commandArgs);
+      break;
+    case 'verify':
+      await cmdVerify(commandArgs);
       break;
     case 'runs':
       cmdRuns(commandArgs);

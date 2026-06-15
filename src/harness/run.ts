@@ -57,8 +57,24 @@ export interface RunResult {
   ok: boolean;
   runId: string;
   acceptance?: AcceptanceResult;
+  /** Per-IU evidence verdicts (for determinism diffing — #30). */
+  evidence?: { iu: string; verdict: string }[];
   failedStage?: string;
   error?: string;
+}
+
+/**
+ * A stable, order-independent signature of a run's EVALUATED verdict (#30): the overall pass/fail,
+ * the failing stage, the acceptance check-set, and the per-IU evidence verdicts. Two runs are
+ * "deterministic as measured by the evaluation" iff their signatures match — regardless of how the
+ * generated code differs. This is the comparison the `phoenix verify` gate makes across N regens.
+ */
+export function verdictSignature(r: RunResult): string {
+  const checks = (r.acceptance?.checks ?? [])
+    .map(c => `${c.name}=${c.ok ? 1 : 0}`).sort().join(',');
+  const ev = (r.evidence ?? [])
+    .map(e => `${e.iu}=${e.verdict}`).sort().join(',');
+  return `ok=${r.ok ? 1 : 0};stage=${r.failedStage ?? '-'};checks=[${checks}];evidence=[${ev}]`;
 }
 
 /**
@@ -316,6 +332,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       ok,
       runId: journal.runId,
       acceptance,
+      evidence: ev.verdicts.map(v => ({ iu: v.iu_name, verdict: v.verdict })),
       failedStage: ok ? undefined : 'acceptance',
     };
   } catch (err) {

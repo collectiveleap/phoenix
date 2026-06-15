@@ -393,6 +393,12 @@ export function buildBoundedShellPrompt(
   lines.push('state is EMPTY (render the empty/pending line then), so the page is immediately typable with no');
   lines.push('data. Give editable lines the textbox role (a real input/textarea, or contenteditable +');
   lines.push('`role="textbox"`) so they are locatable by assistive tech and tests even when empty.');
+  lines.push('STATE is the single source of truth (#34): the fold/`applyOp` reducer MUST have a case for EVERY');
+  lines.push('operation type in the vocabulary — each op folds into model state (e.g. an inline reference is');
+  lines.push('recorded on the referring node, as inline markers/offsets or a `refs` list), and `render()` draws');
+  lines.push('EVERYTHING from that state (inline references and their live labels included). NEVER leave a change');
+  lines.push('only in the live DOM (e.g. a one-shot `range.insertNode`): the next `render()` rebuilds from state and');
+  lines.push('wipes it. An op with no fold case is a silent no-op that vanishes on the next render.');
   lines.push('Where the interaction handlers go, emit EXACTLY this line and nothing else for them:');
   lines.push('    /* __HANDLERS__ */');
   lines.push('When persisting to the backend, use its EXACT operation-type vocabulary and request envelope (from the');
@@ -503,6 +509,10 @@ export function buildBrambleShellPrompt(
   lines.push('  outline is EMPTY it MUST still render a single empty editable line (the pending/trailing line), so');
   lines.push('  the page is immediately typable. Every editable line carries the textbox role (contenteditable +');
   lines.push('  `role="textbox"`) so it is locatable even when empty.');
+  lines.push('- fold/`applyOp` MUST have a case for EVERY op type — INCLUDING `create-reference` (record the inline');
+  lines.push('  reference on the referring node in state, e.g. inline markers/offsets or a `refs` list), alongside');
+  lines.push('  `remove-reference`. An op with no fold case is a silent no-op. `render()`/`renderNode` draws inline');
+  lines.push('  references and their live labels FROM state — never a one-shot `range.insertNode` the next render wipes.');
   lines.push('- `load()`: fetches the operation log from the backend and calls `render()`.');
   lines.push('');
   const providers = (siblingModules ?? []).filter(e => e.role !== 'web-ui');

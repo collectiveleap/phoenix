@@ -113,6 +113,13 @@ const NEGATION = /\b(never|not|no|cannot|can't|must not|may not|won't|shall not)
 const DESCRIPTIVE_CONTEXT =
   /\b(screen|render|redraw|repaint|display|view|page|ui|label|occurrence|live|keystroke|delay|background|everywhere|appears?|shown|visible|highlight|focus|caret|scroll|animat)\b/;
 const MUTATING_CAPS: ReadonlySet<Capability> = new Set<Capability>(['update', 'remove']);
+/**
+ * The spec's append-log / event-store FRAMING (#32) — a deterministic intent signal, stable across
+ * canonicalisations (the store IS framed as an op log; that framing is core, unlike a stray prose verb).
+ * Such a provider's REST surface is append + list; its op types are payload, not per-id CRUD endpoints.
+ */
+const APPEND_LOG_SHAPE =
+  /\b(operation log|log of operations|append(?:s|ed|ing)?\s+(?:a|an|the|each|every)?\s*operation|event[- ]sourc|append-only\s+(?:log|store|operation))\b/i;
 
 /**
  * Derive the CRUD capabilities a module *declares*, from its behavior statements.
@@ -129,6 +136,14 @@ export function declaredCrudCapabilities(iu: ImplementationUnit, canonNodes: Can
     ...(iu.contract?.invariants ?? []),
   ];
   const clauses = statements.flatMap(s => s.toLowerCase().split(/[.;,\n]/)).filter(Boolean);
+
+  // Append-log / event-store provider (#32): the spec frames its data as an operation log. Its HTTP
+  // surface is deterministically append (create) + list — the op *types* (set-content, …) are payload,
+  // NEVER per-id CRUD endpoints. Recognise that framing (stable across canonicalisations, unlike a stray
+  // "the screen updates") and fix the contract, bypassing the CRUD-verb scrape that non-deterministically
+  // reifies a phantom `update`/`get`/`remove` from descriptive prose.
+  if (APPEND_LOG_SHAPE.test(clauses.join(' '))) return ['list', 'create'];
+
   const positive = new Set<Capability>();
   const negated = new Set<Capability>();
   for (const cap of CAPABILITY_ORDER) {
