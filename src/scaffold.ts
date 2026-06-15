@@ -1000,6 +1000,10 @@ export default defineConfig({
   testMatch: '**/*.ui.spec.ts',
   use: {
     baseURL: process.env.PHOENIX_BASE_URL,
+    // Capture a step-by-step trace + screenshot on failure so a failing scenario can be
+    // pinpointed post-hoc (which slice handler fired) without re-running by hand (#34).
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   workers: 1,                          // determinism against the single booted server
   retries: process.env.CI ? 1 : 0,     // damp flakiness in CI without masking real failures

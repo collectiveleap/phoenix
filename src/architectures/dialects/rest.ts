@@ -128,18 +128,25 @@ export function declaredCrudCapabilities(iu: ImplementationUnit, canonNodes: Can
     ...own.map(n => n.statement),
     ...(iu.contract?.invariants ?? []),
   ];
-  // Clause-level scan so a negation only suppresses verbs in its own clause.
   const clauses = statements.flatMap(s => s.toLowerCase().split(/[.;,\n]/)).filter(Boolean);
-  const found = new Set<Capability>();
+  const positive = new Set<Capability>();
+  const negated = new Set<Capability>();
   for (const cap of CAPABILITY_ORDER) {
     const verb = CAPABILITY_VERBS[cap];
     for (const clause of clauses) {
-      if (!verb.test(clause) || NEGATION.test(clause)) continue;
+      if (!verb.test(clause)) continue;
+      if (NEGATION.test(clause)) { negated.add(cap); continue; } // explicit "never update/remove …"
       // A mutating verb used to DESCRIBE behaviour ("the screen updates") is not an operation (#32).
       if (MUTATING_CAPS.has(cap) && DESCRIPTIVE_CONTEXT.test(clause)) continue;
-      found.add(cap); break;
+      positive.add(cap);
     }
   }
+  // Module-level negation PRECEDENCE for MUTATING caps (#32): a mutating capability the spec negates
+  // anywhere ("never modify or remove a logged operation") is excluded even if a stray prose clause
+  // elsewhere also uses the verb — so a non-deterministically-canonicalised "update" can't reinstate an
+  // op the store forbids. Scoped to update/remove only: list/create are the safe append-shape defaults
+  // and must not be killed by a noun-verb collision (e.g. the noun "store" in a negated clause).
+  const found = new Set<Capability>([...positive].filter(c => !(MUTATING_CAPS.has(c) && negated.has(c))));
   if (found.size === 0) return [...CAPABILITY_ORDER]; // nothing declared → full CRUD (no regression)
   return CAPABILITY_ORDER.filter(c => found.has(c));
 }
