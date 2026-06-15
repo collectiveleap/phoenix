@@ -16,7 +16,7 @@ import type { ImplementationUnit } from './models/iu.js';
 import type { CanonicalNode } from './models/canonical.js';
 import type { IUManifest, RegenMetadata, FileManifestEntry } from './models/manifest.js';
 import type { LLMProvider, GenerateOptions } from './llm/provider.js';
-import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt, buildShellPrompt, buildSlicePrompt, buildBoundedShellPrompt, buildCompactSlicePrompt, buildBrambleShellPrompt } from './llm/prompt.js';
+import { buildPrompt, getSystemPrompt, buildTestPrompt, getTestSystemPrompt, buildUiScenarioPrompt, getUiSystemPrompt, buildContinuationPrompt, buildShellPrompt, buildSlicePrompt, buildBoundedShellPrompt, buildCompactSlicePrompt } from './llm/prompt.js';
 import { CanonicalType } from './models/canonical.js';
 import type { ResolvedTarget } from './models/architecture.js';
 import { DEFAULT_ROLE_SURFACES } from './models/architecture.js';
@@ -688,46 +688,10 @@ const planSplitStrategy: WebUIStrategy = {
   },
 };
 
-/** Spec-specific clustering of an outliner's behaviour clauses into known capability groups (#27). */
-const BRAMBLE_CLUSTERS: { key: string; re: RegExp }[] = [
-  { key: 'editing', re: /\b(split|join|indent|dedent|enter|tab|backspace|delete|insert|sibling|edit|type|text)\b/i },
-  { key: 'references', re: /\b(@|mention|reference|backlink|link|\[\[)\b/i },
-  { key: 'navigation', re: /\b(zoom|header|breadcrumb|collapse|expand|fold|focus|caret|arrow|click|select|move)\b/i },
-];
-function brambleClusters(iu: ImplementationUnit, canonNodes: CanonicalNode[]): CanonicalNode[][] {
-  const own = canonNodes.filter(n => iu.source_canon_ids.includes(n.canon_id)
-    && (n.type === CanonicalType.REQUIREMENT || n.type === CanonicalType.CONSTRAINT || n.type === CanonicalType.INVARIANT));
-  const buckets = new Map<string, CanonicalNode[]>();
-  for (const n of own) {
-    const hit = BRAMBLE_CLUSTERS.find(c => c.re.test(n.statement))?.key ?? 'misc';
-    (buckets.get(hit) ?? buckets.set(hit, []).get(hit)!).push(n);
-  }
-  return [...buckets.values()].filter(g => g.length > 0);
-}
-
-/** `bramble` (general:false): a spec-tuned outliner shell + slices grouped by known capability
- * clusters. Concrete + small per call → reliably reaches first-token. Tracked as spec-specific. */
-const brambleStrategy: WebUIStrategy = {
-  name: 'bramble', general: false,
-  async generate(c) {
-    const clusters = brambleClusters(c.iu, c.canonNodes);
-    const groups = clusters.length ? clusters : chunkWebUINodes(c.iu, c.canonNodes);
-    c.log?.(`  ↳ ${c.iu.name}: web-ui via bramble (spec-tuned) → shell + ${groups.length} capability slice(s)`);
-    const shell = await c.gen(buildBrambleShellPrompt(c.iu, c.canonNodes, c.siblingEntries, c.target));
-    const contract = extractShellContract(shell) + backendOpsForPrompt(c.siblingEntries, c.target);
-    const blocks: string[] = [];
-    for (let i = 0; i < groups.length; i++) {
-      blocks.push(cleanCodeResponse(await c.gen(buildCompactSlicePrompt(c.iu, groups[i], contract, c.target, i))));
-    }
-    return composeWebUI(shell, blocks, c.journal, c.iu.name);
-  },
-};
-
 export const WEBUI_STRATEGIES: Record<string, WebUIStrategy> = {
   single: singleStrategy,
   'inline-slice': inlineSliceStrategy,
   'plan-split': planSplitStrategy,
-  bramble: brambleStrategy,
 };
 // plan-split is the default for oversized web-ui: it's the only GENERAL strategy that clears the
 // pre-first-token stall at full spec size (A/B evidence, #27) — single/inline-slice both fail there.

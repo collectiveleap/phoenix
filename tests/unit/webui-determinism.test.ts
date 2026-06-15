@@ -22,15 +22,15 @@ afterEach(() => { delete process.env.PHOENIX_WEBUI_SLICE_BYTES; });
 describe('#30: slice prompts are grounded in the backend op-vocab (no invented ops)', () => {
   it('lists the provider operations with a "call ONLY these / never invent" guard', () => {
     const target = resolveTarget('web-api/node-typescript')!;
-    const ops = restDialect.deriveOperations({ name: 'Bramble Store' } as unknown as ImplementationUnit, []);
-    const contract = makeContract('store-iu', 'Bramble Store', ops, 'an op has a seq and a payload');
+    const ops = restDialect.deriveOperations({ name: 'Op Store' } as unknown as ImplementationUnit, []);
+    const contract = makeContract('store-iu', 'Op Store', ops, 'an op has a seq and a payload');
     const entry: InterfaceEntry = {
-      iu_id: 'store-iu', name: 'Bramble Store', mount_path: '/bramble-store', role: 'api', resource_fields: '', contract,
+      iu_id: 'store-iu', name: 'Op Store', mount_path: '/op-store', role: 'api', resource_fields: '', contract,
     };
     const out = backendOpsForPrompt([entry], target);
     expect(out).toMatch(/call ONLY these/);
     expect(out).toMatch(/never invent/i);
-    expect(out).toContain('/bramble-store');           // the real store address the slice must use
+    expect(out).toContain('/op-store');           // the real store address the slice must use
     expect(backendOpsForPrompt([], target)).toBe('');  // no providers → nothing
   });
 });

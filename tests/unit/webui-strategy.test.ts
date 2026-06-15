@@ -90,7 +90,8 @@ describe('#27 harness: selection + registry', () => {
     expect(selectWebUIStrategy('inline-slice').name).toBe('inline-slice');
     expect(selectWebUIStrategy('does-not-exist').name).toBe('plan-split');
     expect(WEBUI_STRATEGIES['plan-split'].general).toBe(true);
-    expect(WEBUI_STRATEGIES['bramble'].general).toBe(false); // spec-specific, tracked
+    // every registered strategy is general (no spec-coupled strategy in the registry).
+    expect(Object.values(WEBUI_STRATEGIES).every(s => s.general)).toBe(true);
   });
 });
 
@@ -108,7 +109,7 @@ describe('#27 plan-split durability: bounded shell prompt does not grow with the
 });
 
 describe('#27 harness: each strategy composes a body behind the seam', () => {
-  for (const name of ['single', 'inline-slice', 'plan-split', 'bramble']) {
+  for (const name of ['single', 'inline-slice', 'plan-split']) {
     it(`strategy ${name} produces one served body`, async () => {
       process.env.PHOENIX_WEBUI_SLICE_TOKENS = '0'; // force the strategy path
       process.env.PHOENIX_WEBUI_STRATEGY = name;
