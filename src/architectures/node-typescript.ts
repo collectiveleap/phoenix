@@ -289,6 +289,13 @@ never its internals. Derive every assertion from the requirements; the rendered 
 - Make each test SELF-CONTAINED and order-independent: create the data it needs inside the test with a UNIQUE
   value (e.g. a per-test label), and assert only on what it created. The app may share one persistent store
   across tests, so never depend on data from another test or on execution order.
+- Seed data must NOT collide with what the SAME test later asserts: a seed label must not match a regex or text
+  the test checks. NEVER seed a word that appears in an error/status pattern (e.g. don't type \`unique('offline')\`
+  then assert \`/…|offline|…/\` — that regex matches the seed too, two hits → strict-mode failure). Use a NEUTRAL
+  seed like \`unique('note')\`.
+- Assert an error/status indicator by its ROLE or container — \`getByRole('status')\`, \`getByRole('alert')\`, or
+  a scoped locator for the hint element — NOT a page-wide text regex that can also match user-typed content
+  (a page-wide regex can match seed text and resolve to 2 elements under strict mode).
 - Cover EACH behavior clause — including every branch and direction — with its own scenario: a fork (e.g. an
   action on a line WITH text vs an EMPTY line), both directions of a gesture (left vs right, open vs close), and
   any "live / on every keystroke" update each get a scenario. A missing branch must surface as a failing
