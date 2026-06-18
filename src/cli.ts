@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join, resolve, relative, basename, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // Stores
 import { SpecStore } from './store/spec-store.js';
@@ -33,7 +34,7 @@ import { BootstrapStateMachine } from './bootstrap.js';
 // Phase C
 import { planIUs, analyzePlan } from './iu-planner.js';
 import { loadIUs, saveIUs } from './iu-planner-io.js';
-import { runSupervised, renderRunStatus, verdictSignature } from './harness/run.js';
+import { runSupervised, renderRunStatus, verdictSignature, type RunResult } from './harness/run.js';
 import { sha256 } from './semhash.js';
 import { loadPolicy, describePolicy } from './harness/policy.js';
 import { acquireRunLock, AlreadyRunningError } from './harness/lock.js';
@@ -77,6 +78,9 @@ import { auditIU, auditAll } from './audit.js';
 import type { AuditResult, ReadinessLevel } from './audit.js';
 import { EvaluationStore } from './store/evaluation-store.js';
 import { NegativeKnowledgeStore } from './store/negative-knowledge-store.js';
+import { ProvenanceStore } from './store/provenance-store.js';
+import type { RunProvenance, IUProvenance, DivergenceReport } from './models/provenance.js';
+import { CANON_STRATEGIES, DEFAULT_CANON_STRATEGY, canonicalGraphHash } from './canon-strategy.js';
 import type { PaceLayerMetadata } from './models/pace-layer.js';
 
 // Models
@@ -159,6 +163,25 @@ function severityIcon(severity: string): string {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const VERSION = '0.1.0';
+
+/** Build-stamped git provenance of THIS Phoenix install. Written by scripts/stamp-version.mjs at build
+ * time and read relative to the CLI's own location — never from cwd, which is the target project being
+ * regenerated. This is the `producer.phoenix_version` join key carried on every provenance record. */
+export interface PhoenixVersion { npm_version: string; commit: string; dirty: boolean; built_at: string }
+
+export function phoenixVersion(): PhoenixVersion {
+  const fallback: PhoenixVersion = { npm_version: VERSION, commit: 'unknown', dirty: false, built_at: '' };
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));        // dist/ when built
+    return { ...fallback, ...JSON.parse(readFileSync(join(here, 'version.json'), 'utf8')) };
+  } catch { return fallback; }
+}
+
+/** Short, human display form: `0.1.0 (abc123def456-dirty)`. */
+export function phoenixVersionLabel(v: PhoenixVersion = phoenixVersion()): string {
+  const sha = v.commit === 'unknown' ? '' : ` (${v.commit.slice(0, 12)}${v.dirty ? '-dirty' : ''})`;
+  return `${v.npm_version}${sha}`;
+}
 
 function findPhoenixRoot(from: string = process.cwd()): string | null {
   let dir = resolve(from);
@@ -1380,6 +1403,111 @@ function hashGeneratedTree(projectRoot: string): string {
   return sha256(files.map(f => relative(root, f) + ' ' + readFileSync(f, 'utf8')).join(''));
 }
 
+/** Assemble a RunProvenance from a completed run: per-IU code hashes + consumed contracts from the
+ * manifest, per-IU verdicts from the run's evidence, input hashes from the clause set + canonical graph,
+ * and the producing Phoenix commit. The captured causal chain `diffRuns` later localizes. */
+function buildRunProvenance(
+  result: RunResult,
+  ctx: { clauses: Clause[]; projectRoot: string; phoenixDir: string; generatorModel: string; createdAt: string },
+): RunProvenance {
+  const v = phoenixVersion();
+  const manifest = new ManifestManager(ctx.phoenixDir).load();
+  const canonByIu = new Map(loadIUs(ctx.phoenixDir).map(iu => [iu.iu_id, iu.source_canon_ids]));
+
+  const ius: IUProvenance[] = Object.values(manifest.iu_manifests).map(m => {
+    const code_hash = sha256(Object.values(m.files).map(f => `${f.path} ${f.content_hash}`).sort().join('\n'));
+    const verdict = (result.evidence ?? []).find(e => e.iu === m.iu_name)?.verdict ?? 'INCOMPLETE';
+    return {
+      iu_id: m.iu_id,
+      name: m.iu_name,
+      source_canon_ids: canonByIu.get(m.iu_id) ?? [],
+      generation: { code_hash, model: m.regen_metadata?.model_id },
+      decision: verdict,
+    };
+  });
+
+  const contract_hashes: Record<string, string> = {};
+  for (const m of Object.values(manifest.iu_manifests)) {
+    for (const [provider, hash] of Object.entries(m.consumed_contracts ?? {})) {
+      contract_hashes[`${m.iu_id}→${provider}`] = hash;
+    }
+  }
+
+  const checks = (result.acceptance?.checks ?? []).map(c => ({ name: c.name, ok: c.ok }));
+
+  return {
+    run_id: result.runId,
+    created_at: ctx.createdAt,
+    producer: { phoenix_version: v.commit, phoenix_dirty: v.dirty, generator_model: ctx.generatorModel },
+    trigger: {
+      kind: 'verify',
+      spec_semhash: sha256(ctx.clauses.map(c => c.clause_id).sort().join('\n')),
+      eval_suite_hash: sha256(checks.map(c => c.name).sort().join(',')),
+    },
+    inputs: {
+      clause_set_hash: sha256(ctx.clauses.map(c => c.clause_semhash).sort().join('\n')),
+      canonical_graph_hash: result.canonicalGraphHash ?? 'none',
+      contract_hashes,
+    },
+    checks,
+    ius,
+    verdict_signature: verdictSignature(result),
+    tree_hash: hashGeneratedTree(ctx.projectRoot),
+    overall: result.ok ? 'ok' : 'fail',
+  };
+}
+
+/** Render a divergence as a copy-pasteable diagnosis issue (the existing template shape). Phoenix only
+ * PRINTS it; the operator files it with `gh issue create -F -`. No outward side effects from the tool. */
+function formatDiagnosisIssue(
+  report: DivergenceReport,
+  runIds: string[],
+  v: { commit: string; dirty: boolean },
+  runs: number,
+): string {
+  const sha = `${v.commit}${v.dirty ? '-dirty' : ''}`;
+  const stageDesc: Record<string, string> = {
+    inputs: 'canonicalization — the canonical graph/contracts differ run-to-run (upstream of generation)',
+    generation: "code generation — an IU's generated code differs run-to-run on identical inputs",
+    evaluation: 'evaluation — a verdict differs run-to-run on identical code (a non-deterministic evaluator)',
+    none: 'no localized structural fork (verdicts differ without a single forking stage)',
+  };
+  const fixLocus: Record<string, string> = {
+    inputs: '`src/canonicalizer*.ts`, `src/architectures/dialects/*` — ground the canonical graph deterministically.',
+    generation: '`src/regen.ts`, `src/llm/prompt.ts` — constrain generation for the forking IU(s).',
+    evaluation: '`src/harness/*` and the generated tests — the evaluator is non-deterministic.',
+    none: 'unknown — inspect the differing verdict signatures.',
+  };
+  const L: string[] = [];
+  L.push(`title: "Phoenix: non-deterministic verify (${report.verdict_signatures.length} verdicts / ${runs} regens, forks at ${report.stage})"`);
+  L.push('labels: diagnosis, nondeterminism');
+  L.push('');
+  L.push('## Headline');
+  L.push(report.verdict_stable
+    ? `\`phoenix verify --runs=${runs}\` is stably RED — a repeatable failure.`
+    : `\`phoenix verify --runs=${runs}\` produced ${report.verdict_signatures.length} distinct verdicts; divergence first forks at the **${report.stage}** stage.`);
+  L.push('');
+  L.push('## Evidence');
+  L.push(`- Phoenix version: \`${sha}\``);
+  L.push(`- Divergence stage: **${report.stage}** — ${stageDesc[report.stage]}`);
+  if (report.details.length) {
+    L.push('- Forking points:');
+    for (const d of report.details.slice(0, 20)) L.push(`  - \`${d.key}\` → ${d.variants.length} distinct values`);
+  }
+  L.push('- Verdict signatures:');
+  for (const s of report.verdict_signatures) L.push(`  - \`${s}\``);
+  L.push('');
+  L.push('## Outcomes & evidence of success');
+  L.push(`1. \`phoenix verify --runs=${runs}\` yields a single stable GREEN verdict on a later Phoenix version (attach the cross-version comparison vₙ₋₁→vₙ).`);
+  L.push('');
+  L.push('## Fix locus');
+  L.push(fixLocus[report.stage]);
+  L.push('');
+  L.push('## Provenance');
+  L.push(`Produced by \`phoenix verify\` on Phoenix \`${sha}\`. Provenance run ids (under \`.phoenix/provenance/runs/\`): ${runIds.map(r => `\`${r}\``).join(', ')}. Related: #30.`);
+  return L.join('\n');
+}
+
 /**
  * `phoenix verify [--runs N]` (#30) — the determinism gate. Regenerate the SAME spec N times (clean
  * each), and check the EVALUATED verdict is reproducible. Phoenix's generation steps are non-deterministic
@@ -1413,38 +1541,53 @@ async function cmdVerify(args: string[]): Promise<void> {
     return clauses;
   };
 
-  const runsOut: { sig: string; ok: boolean; hash: string; runId: string }[] = [];
+  const provStore = new ProvenanceStore(phoenixDir);
+  const generatorModel = llm.model ?? 'unknown';
+  const runIds: string[] = [];
+  let firstOk = false;
   for (let i = 0; i < runs; i++) {
     rmSync(join(projectRoot, 'data'), { recursive: true, force: true });          // fresh store each regen
     rmSync(join(projectRoot, 'src', 'generated'), { recursive: true, force: true }); // clean generation
     console.log(dim(`  run ${i + 1}/${runs}…`));
+    const clauses = ingest();
     const result = await runSupervised({
-      projectRoot, phoenixDir, clauses: ingest(), arch, llm, policy,
+      projectRoot, phoenixDir, clauses, arch, llm, policy,
       resume: false, forceScaffold: true, runtimeChecks: true, install: i === 0,
       log: () => { /* quiet per-run */ },
     });
-    const sig = verdictSignature(result);
-    runsOut.push({ sig, ok: result.ok, hash: hashGeneratedTree(projectRoot), runId: result.runId });
-    console.log(`    ${result.ok ? green('✔') : red('✖')} ${result.runId}  ${dim(sig)}`);
+    // Capture the run's provenance into the durable store BEFORE the next iteration wipes the workspace.
+    provStore.record(buildRunProvenance(result, {
+      clauses, projectRoot, phoenixDir, generatorModel, createdAt: new Date().toISOString(),
+    }));
+    runIds.push(result.runId);
+    if (i === 0) firstOk = result.ok;
+    console.log(`    ${result.ok ? green('✔') : red('✖')} ${result.runId}  ${dim(verdictSignature(result))}`);
   }
 
-  const sigs = new Set(runsOut.map(r => r.sig));
-  const hashes = new Set(runsOut.map(r => r.hash));
+  // The payoff: localize where the runs' causal chains fork, rather than reporting a bare verdict count.
+  const report = provStore.diffRuns(runIds);
   console.log();
-  if (sigs.size === 1) {
-    console.log(green(`✔ Deterministic verdict across ${runs} regens.`));
-    console.log(hashes.size === 1
+  if (report.verdict_stable && firstOk) {
+    console.log(green(`✔ Deterministic GREEN verdict across ${runs} regens.`));
+    console.log(report.stage === 'none'
       ? green('  generated output identical across runs too.')
-      : dim(`  generated output varied (${hashes.size} distinct) but the verdict is stable — deterministic as measured by the evaluation.`));
-    if (!runsOut[0].ok) {
-      console.log(yellow('  …but the verdict is RED — an honest, repeatable failure (not complete).'));
-      process.exitCode = 1;
-    }
-  } else {
-    console.log(red(`✖ NON-deterministic verdict: ${sigs.size} distinct verdicts across ${runs} regens — not complete.`));
-    for (const s of sigs) console.log(`    ${dim(s)}`);
-    process.exitCode = 1;
+      : dim(`  output varied at the '${report.stage}' stage, but the verdict is stable — deterministic as measured by the evaluation.`));
+    return;
   }
+
+  // Gate failed — non-deterministic and/or stably red. Localize, then emit a fileable diagnosis so the
+  // finding crosses from loop-bramble-regen into loop-improve-phoenix.
+  if (!report.verdict_stable) {
+    console.log(red(`✖ NON-deterministic verdict: ${report.verdict_signatures.length} distinct verdicts across ${runs} regens — not complete.`));
+    console.log(`  divergence first forks at stage: ${bold(report.stage)}`);
+    for (const d of report.details.slice(0, 12)) console.log(`    ${dim('•')} ${d.key} → ${d.variants.length} distinct`);
+  } else {
+    console.log(yellow(`✖ Stable RED verdict across ${runs} regens — an honest, repeatable failure (not complete).`));
+  }
+  console.log();
+  console.log(dim('── regen→improve handoff: file this as a diagnosis issue (gh issue create -F -) ──'));
+  console.log(formatDiagnosisIssue(report, runIds, phoenixVersion(), runs));
+  process.exitCode = 1;
 }
 
 /** Inspect persisted runs (O15: answer the three questions post-hoc). */
@@ -1627,6 +1770,79 @@ function cmdWebUIStrategies(): void {
   }
   console.log('\n  select with PHOENIX_WEBUI_STRATEGY=<name> (default: plan-split)');
   console.log('  per-run metrics are journalled as `webui_strategy` — run the same spec under each to A/B.\n');
+}
+
+function cmdCanonStrategies(): void {
+  const active = process.env.PHOENIX_CANON_STRATEGY ?? DEFAULT_CANON_STRATEGY;
+  console.log('\nCanonicalization identity strategies (#36)\n');
+  for (const [name, s] of Object.entries(CANON_STRATEGIES)) {
+    const mark = name === active ? blue(' ← active') : '';
+    console.log(`  ${name.padEnd(14)}${mark}\n    ${dim(s.description)}`);
+  }
+  console.log(`\n  select with PHOENIX_CANON_STRATEGY=<name> (default: ${DEFAULT_CANON_STRATEGY})`);
+  console.log('  A/B with `phoenix canon-compare [--runs N]` — measures determinism across runs.\n');
+}
+
+/**
+ * Compare canonicalization identity strategies in ONE command (#36): canonicalize the SAME spec N times
+ * under each strategy and measure determinism — distinct canonical graphs and distinct IU-id sets across
+ * the runs. `rule-identity` should be deterministic (1 distinct); `llm-identity` should not. This is
+ * canonicalization only — no code generation/boot/Playwright — so it is far cheaper than `verify`.
+ */
+async function cmdCanonCompare(args: string[]): Promise<void> {
+  const { projectRoot, phoenixDir } = requirePhoenixRoot();
+  const runs = Math.max(2, Number(args.find(a => a.startsWith('--runs='))?.split('=')[1]) || 3);
+  const list = args.find(a => !a.startsWith('-'));
+  const names = (list ? list.split(',') : Object.keys(CANON_STRATEGIES)).filter(n => CANON_STRATEGIES[n]);
+  if (names.length === 0) {
+    console.log(red(`✖ No valid strategies. Available: ${Object.keys(CANON_STRATEGIES).join(', ')}`));
+    process.exitCode = 1; return;
+  }
+  const llm = resolveProvider(phoenixDir);
+  if (!llm) { console.log(red('✖ canon-compare needs an LLM provider.')); process.exitCode = 1; return; }
+
+  let arch: ResolvedTarget | null = null;
+  const configPath = join(phoenixDir, 'config.json');
+  if (existsSync(configPath)) {
+    try { const cfg = JSON.parse(readFileSync(configPath, 'utf8')); if (cfg.architecture) arch = resolveTarget(cfg.architecture); } catch { /* ignore */ }
+  }
+
+  // Ingest clauses once — the same input feeds every run (mirrors cmdVerify's ingest).
+  const specStore = new SpecStore(phoenixDir);
+  const specFiles = findSpecFiles(projectRoot);
+  for (const f of specFiles) specStore.ingestDocument(f, projectRoot);
+  const clauses: Clause[] = [];
+  for (const f of specFiles) clauses.push(...specStore.getClauses(relative(projectRoot, f)));
+  if (clauses.length === 0) { console.log(yellow('⚠ No clauses. Run `phoenix ingest` first.')); return; }
+  const roleSurfaces = arch?.architecture.roleSurfaces;
+
+  console.log(bold(`\n🔬 canonicalization identity comparison — ${names.join(', ')} · ${runs} runs each\n`));
+  console.log(`  ${dim('strategy        runs  distinct-graphs  distinct-iu-sets  determinism')}`);
+
+  const summary: { name: string; deterministic: boolean }[] = [];
+  for (const name of names) {
+    const graphHashes: string[] = [];
+    const iuSetSigs: string[] = [];
+    for (let i = 0; i < runs; i++) {
+      const canon = await canonicalize(clauses, llm, { strategy: name });
+      const ius = planIUs(canon.nodes, clauses, { roleSurfaces });
+      graphHashes.push(canonicalGraphHash(canon.nodes));
+      iuSetSigs.push(ius.map(iu => iu.iu_id).sort().join(','));
+    }
+    const distinctGraphs = new Set(graphHashes).size;
+    const distinctIuSets = new Set(iuSetSigs).size;
+    const deterministic = distinctGraphs === 1 && distinctIuSets === 1;
+    summary.push({ name, deterministic });
+    const mark = deterministic ? green('✓ deterministic') : red(`✗ non-deterministic`);
+    console.log(`  ${name.padEnd(15)} ${String(runs).padEnd(5)} ${String(distinctGraphs).padEnd(16)} ${String(distinctIuSets).padEnd(17)} ${mark}`);
+  }
+
+  console.log();
+  const winners = summary.filter(s => s.deterministic).map(s => s.name);
+  console.log(winners.length
+    ? green(`  deterministic: ${winners.join(', ')}`)
+    : yellow('  none deterministic across the runs'));
+  console.log(dim('  select one for a regen/verify run with PHOENIX_CANON_STRATEGY=<name>.\n'));
 }
 
 async function cmdCanonicalize(): Promise<void> {
@@ -1986,7 +2202,7 @@ function readinessToIcon(readiness: ReadinessLevel): string {
 }
 
 function cmdVersion(): void {
-  console.log(`Phoenix VCS v${VERSION}`);
+  console.log(`Phoenix VCS v${phoenixVersionLabel()}`);
 }
 
 function cmdHelp(): void {
@@ -2013,6 +2229,8 @@ ${bold('Spec Management:')}
 ${bold('Canonical Graph:')}
   ${cyan('canonicalize')}          Extract canonical nodes from ingested clauses
   ${cyan('canon')}                 Show the canonical graph
+  ${cyan('canon-strategies')}      List canonicalization identity strategies (#36)
+  ${cyan('canon-compare')} [--runs N]  A/B identity strategies by determinism across N runs
 
 ${bold('Implementation:')}
   ${cyan('plan')}                  Plan Implementation Units from canonical graph
@@ -2093,6 +2311,12 @@ async function main(): Promise<void> {
       break;
     case 'webui-compare':
       await cmdWebUICompare(commandArgs);
+      break;
+    case 'canon-strategies':
+      cmdCanonStrategies();
+      break;
+    case 'canon-compare':
+      await cmdCanonCompare(commandArgs);
       break;
     case 'regen':
     case 'regenerate':

@@ -9,7 +9,7 @@
     "phoenix": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/stamp-version.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "phoenix": "node dist/cli.js"

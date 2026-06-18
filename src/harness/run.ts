@@ -23,6 +23,7 @@ import type { RegenContext } from '../regen.js';
 import { ManifestManager } from '../manifest.js';
 import { CanonicalStore } from '../store/canonical-store.js';
 import { saveIUs } from '../iu-planner-io.js';
+import { canonicalGraphHash as computeCanonicalGraphHash } from '../canon-strategy.js';
 import { RunJournal } from '../observe/journal.js';
 import type { RunSnapshot } from '../observe/journal.js';
 import { KeepAwake, abortAllInFlight } from '../observe/watchdog.js';
@@ -59,6 +60,9 @@ export interface RunResult {
   acceptance?: AcceptanceResult;
   /** Per-IU evidence verdicts (for determinism diffing — #30). */
   evidence?: { iu: string; verdict: string }[];
+  /** Hash of the canonical requirement graph this run produced — lets provenance localize
+   * canonicalization-stage non-determinism (upstream of generation, #30/#32). */
+  canonicalGraphHash?: string;
   failedStage?: string;
   error?: string;
 }
@@ -146,6 +150,11 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
     journal.endStage('canonicalize', 'ok', { mode: canon.stats.mode, nodes: canon.nodes.length });
     log(`canonicalize: ${canon.nodes.length} nodes (${canon.stats.mode})`);
 
+    // Identity-based hash of the canonical graph this run produced — carried on RunResult so the
+    // provenance store can localize canonicalization-stage non-determinism upstream of any generation
+    // fork. Shared with the A/B harness so "the canonical graph" means the same thing in both (#36).
+    const canonicalGraphHash = computeCanonicalGraphHash(canon.nodes);
+
     // ── Plan ────────────────────────────────────────────────────────────
     journal.startStage('plan');
     const ius = planIUs(canon.nodes, clauses, { roleSurfaces: arch?.architecture.roleSurfaces });
@@ -212,6 +221,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
         return {
           ok: false,
           runId: journal.runId,
+          canonicalGraphHash,
           failedStage: 'provision',
           error: prov.steps.find(s => !s.ok)?.detail,
         };
@@ -274,6 +284,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       return {
         ok: false,
         runId: journal.runId,
+        canonicalGraphHash,
         failedStage: 'generate',
         error: `${failedModules.length} module(s) exceeded the output token budget — ${detail}`,
       };
@@ -333,6 +344,7 @@ export async function runSupervised(opts: RunOptions): Promise<RunResult> {
       runId: journal.runId,
       acceptance,
       evidence: ev.verdicts.map(v => ({ iu: v.iu_name, verdict: v.verdict })),
+      canonicalGraphHash,
       failedStage: ok ? undefined : 'acceptance',
     };
   } catch (err) {

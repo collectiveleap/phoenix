@@ -19,4 +19,7 @@ labels: diagnosis
 <!-- Where in the code it likely lives (file paths), if known. -->
 
 ## Provenance
-<!-- How it surfaced; link related issues as #N. -->
+<!-- How it surfaced; link related issues as #N.
+     For a `phoenix verify` determinism handoff, paste the block verify printed — it already carries the
+     Phoenix commit it was observed on, the divergence stage (canonicalization / generation / evaluation),
+     the forking points, and the provenance run-ids under .phoenix/provenance/runs/. -->

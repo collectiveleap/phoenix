@@ -18,12 +18,16 @@ import { resolveGraph } from './resolution.js';
 import { CONFIG } from './experiment-config.js';
 import type { RunJournal } from './observe/journal.js';
 import { recordPlainGenerate } from './observe/instrument.js';
+import { selectCanonStrategy, type CanonIdentityStrategy } from './canon-strategy.js';
 
 export interface LLMCanonOptions {
   /** Enable self-consistency with k samples (default: 1 = no self-consistency) */
   selfConsistencyK?: number;
   /** Run journal — records every LLM call (O1) and per-clause classification (O4). */
   journal?: RunJournal;
+  /** Identity strategy (#36): whether the LLM rewrite enters the content-addressed identity. A name
+   * (resolved via `selectCanonStrategy`) or a strategy object. Default = current behavior. */
+  strategy?: string | CanonIdentityStrategy;
 }
 
 /**
@@ -92,7 +96,8 @@ export async function canonicalize(
   let fellBack = false;
   try {
     const k = options?.selfConsistencyK ?? 1;
-    const res = await normalizeCandidates(candidates, llm, k, journal);
+    const strategy = typeof options?.strategy === 'object' ? options.strategy : selectCanonStrategy(options?.strategy);
+    const res = await normalizeCandidates(candidates, llm, k, journal, strategy);
     normalized = res.candidates;
     llmCalls = res.llmCalls;
   } catch {
@@ -132,6 +137,7 @@ async function normalizeCandidates(
   llm: LLMProvider,
   k: number = 1,
   journal?: RunJournal,
+  strategy: CanonIdentityStrategy = selectCanonStrategy(),
 ): Promise<{ candidates: CandidateNode[]; llmCalls: number }> {
   const results: CandidateNode[] = [];
   let llmCalls = 0;
@@ -162,8 +168,7 @@ async function normalizeCandidates(
         });
         const normalized = parseNormalizerResponse(response);
         if (normalized && normalized.length > 5) {
-          const newId = sha256([c.type, normalized, c.source_clause_ids[0]].join('\x00'));
-          results.push({ ...c, candidate_id: newId, statement: normalized, extraction_method: 'llm' });
+          results.push(strategy.applyNormalization(c, normalized));
         } else {
           results.push(c);
         }
@@ -184,8 +189,7 @@ async function normalizeCandidates(
           results.push(c);
         } else {
           const medoid = selectMedoid(samples);
-          const newId = sha256([c.type, medoid, c.source_clause_ids[0]].join('\x00'));
-          results.push({ ...c, candidate_id: newId, statement: medoid, extraction_method: 'llm' });
+          results.push(strategy.applyNormalization(c, medoid));
         }
       }
     } catch {

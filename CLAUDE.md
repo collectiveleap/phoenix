@@ -14,3 +14,8 @@ State: open = not implemented; `partial` label = partially done; closed = implem
 evidence in the closing comment). Loop is unchanged — diagnose → fix → commit, referencing `#<N>`.
 
 Submitting a new issue (format, labels, template) is documented for everyone in `CONTRIBUTING.md`.
+
+When `phoenix verify` reports a regeneration as non-deterministic or stably red, hand it off to the
+Phoenix-improvement loop as a diagnosis issue — `verify` prints a ready-to-file block. The
+regen→improve handoff convention (what crosses, the `nondeterminism` label, and the eval-verified
+version-over-version closing rule) is in `CONTRIBUTING.md`.
